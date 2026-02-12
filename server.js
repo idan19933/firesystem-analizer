@@ -1,6 +1,7 @@
 /**
- * Fire Safety Checker - Railway Server v16
- * Standalone Express server for Railway deployment
+ * Fire Safety Checker - Railway Server v18
+ * DXF: Pure text analysis - NO images, NO SVG, NO PNG
+ * DWG: APS + Claude Vision (unchanged)
  */
 
 const express = require('express');
@@ -437,74 +438,61 @@ function getInstructionPrompt(instructionId) {
   return buildCustomPrompt(instruction.prompt, instruction.name);
 }
 
-// ===== TWO-PASS DXF ANALYSIS =====
+// ===== DXF TEXT-BASED ANALYSIS (NO IMAGES) =====
 
-const DXF_IDENTIFICATION_PROMPT = `You are analyzing a vectorized architectural floor plan rendered from a DXF file.
-The file has no layer names or text labels — all entities are on layer "0".
+const DXF_TEXT_ANALYSIS_PROMPT = `אתה מומחה לבטיחות אש המנתח נתוני וקטור גולמיים מקובץ DXF של תוכנית אדריכלית.
 
-Your job is to IDENTIFY and LIST every fire-safety-relevant element you can see:
-- Doors (regular and fire-rated) — count and approximate locations
-- Stairs and stairwells
-- Exit routes and emergency exits
-- Sprinkler heads (small circles in grid patterns)
-- Smoke/heat detector symbols
-- Fire extinguisher symbols
-- Hydrant/hose reel symbols
-- Fire-rated walls (thicker or double lines)
-- Emergency lighting symbols
-- Exit signs
-- Room labels or dimensions if visible
-- Building outline and estimated floor area
-- Corridors and their approximate widths
+קיבלת מידע מפורט על כל האלמנטים בתוכנית:
+- כל התוויות והטקסטים עם המיקומים שלהם
+- עיגולים (סימולים פוטנציאליים כמו ספרינקלרים, גלאים)
+- קשתות (דלתות - ציר פתיחה)
+- פוליקווים סגורים (חדרים, תאי אש)
+- הפניות לבלוקים (סמלים סטנדרטיים)
 
-Return ONLY valid JSON:
-{
-  "identified": {
-    "doors": { "count": 0, "locations": ["description"] },
-    "fireDoors": { "count": 0, "locations": [] },
-    "stairs": { "count": 0, "locations": [] },
-    "exits": { "count": 0, "locations": [] },
-    "sprinklers": { "count": 0, "pattern": "description" },
-    "smokeDetectors": { "count": 0 },
-    "fireExtinguishers": { "count": 0 },
-    "hydrants": { "count": 0 },
-    "emergencyLights": { "count": 0 },
-    "exitSigns": { "count": 0 },
-    "fireWalls": { "count": 0 },
-    "corridorWidths": ["estimates"],
-    "estimatedFloorArea": "sqm estimate",
-    "buildingType": "description"
-  }
-}`;
-
-function buildScoringPrompt(identifiedData, vectorStats) {
-  return `Based on this identified element data from an architectural floor plan:
-${JSON.stringify(identifiedData, null, 2)}
-
-And these vector statistics:
-- Total geometric entities: ${vectorStats.entityCount}
-- Walls detected: ${vectorStats.walls}
-- Doors detected: ${vectorStats.doors}
-- Texts found: ${vectorStats.texts}
-- Unique layers: ${vectorStats.layerCount}
-
-Perform a full fire safety compliance check against Israeli regulations:
+בצע ניתוח מקיף לבטיחות אש בהתאם לתקנות הישראליות:
 - תקנות הבטיחות באש
 - הוראות נציב כבאות 536, 550
 - TI-1220 (מערכות גילוי)
 - TI-1596 (מערכות ספרינקלרים)
 
-Check ALL 10 categories and return the standard analysis JSON with scores.
-Be thorough - use the identified element counts and locations to assess compliance.
+קטגוריות לבדיקה:
+1. דרכי גישה לכבאות
+2. דרכי מילוט ויציאות - מספר, מיקום, רוחב (מינימום 90 ס"מ)
+3. מערכת גילוי אש - גלאי עשן, גלאי חום
+4. מערכת ספרינקלרים - פריסה, כיסוי
+5. ציוד כיבוי ידני - מטפים, הידרנטים
+6. הפרדות אש - קירות אש, דלתות אש
+7. תאורת חירום ושילוט - סימון יציאות
+8. שליטה בעשן - אוורור
+9. מערכות צנרת אש
+10. תיעוד ותכנון
 
-Return ONLY valid JSON:
+הנחיות לזיהוי:
+- עיגולים קטנים בתבנית רשת = ספרינקלרים
+- עיגולים עם תווית SD/גלאי = גלאי עשן
+- קשתות 90° ברדיוס 0.7-1.5 מ' = דלתות
+- טקסט "יציאה/EXIT/מוצא" = יציאות חירום
+- טקסט "מדרגות/STAIR" = חדרי מדרגות
+- טקסט "אש/FIRE/FD" = דלתות אש
+
+פורמט פלט JSON:
 \`\`\`json
 {
-  "buildingType": "תיאור בעברית",
+  "buildingType": "תיאור סוג המבנה בעברית",
   "overallScore": 0-100,
   "overallStatus": "עובר/נכשל/דורש_בדיקה",
+  "identifiedElements": {
+    "sprinklers": { "count": 0, "coverage": "תיאור" },
+    "smokeDetectors": { "count": 0 },
+    "fireExtinguishers": { "count": 0 },
+    "hydrants": { "count": 0 },
+    "exits": { "count": 0, "locations": [] },
+    "fireDoors": { "count": 0 },
+    "stairs": { "count": 0 },
+    "rooms": { "count": 0 }
+  },
   "categories": [
-    {"id": 1, "name": "דרכי גישה לכבאות", "nameHe": "דרכי גישה לכבאות", "status": "עובר/נכשל/דורש_בדיקה", "score": 0-100, "findings": ["ממצא"], "recommendations": ["המלצה"]},
+    {"id": 1, "name": "דרכי גישה לכבאות", "nameHe": "דרכי גישה לכבאות", "status": "עובר/נכשל/דורש_בדיקה", "score": 0-100, "findings": ["ממצא בעברית"], "recommendations": ["המלצה בעברית"]},
     {"id": 2, "name": "דרכי מילוט ויציאות", "nameHe": "דרכי מילוט ויציאות", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
     {"id": 3, "name": "מערכת גילוי אש", "nameHe": "מערכת גילוי אש", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
     {"id": 4, "name": "מערכת ספרינקלרים", "nameHe": "מערכת ספרינקלרים", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
@@ -516,94 +504,57 @@ Return ONLY valid JSON:
     {"id": 10, "name": "תיעוד ותכנון", "nameHe": "תיעוד ותכנון", "status": "...", "score": 0-100, "findings": [], "recommendations": []}
   ],
   "criticalIssues": ["בעיה קריטית בעברית"],
-  "identifiedElements": ${JSON.stringify(identifiedData.identified || identifiedData)},
   "summary": "סיכום מפורט בעברית",
   "summaryHe": "סיכום מפורט בעברית"
 }
 \`\`\`
 
-חשוב: כל הטקסט בעברית! השתמש בנתונים שזוהו כדי לבסס את הציונים.`;
-}
+חשוב: כל הטקסט בעברית! השתמש בנתונים הוקטוריים כדי לזהות אלמנטים ולבסס את הציונים.`;
 
-// Two-pass DXF analysis: Vision identification → Regulation scoring
-async function analyzeDXFTwoPass(imageBuffers, vectorData) {
-  console.log('  Pass 1: Visual identification with Claude Vision...');
+// Pure text-based DXF analysis function (no images)
+async function analyzeDXFText(vectorSummary) {
+  console.log('  Sending vector data to Claude (text mode, no images)...');
+  console.log('  Summary length: ' + vectorSummary.length + ' chars');
 
-  // Pass 1: Send images to Claude Vision for element identification
-  const content = [
-    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBuffers.fullImage.toString('base64') } },
-    { type: 'text', text: 'Full floor plan overview:' }
-  ];
-  for (const zone of imageBuffers.zones) {
-    content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: zone.buffer.toString('base64') } });
-    content.push({ type: 'text', text: `Detail zone: ${zone.label}` });
-  }
-  content.push({ type: 'text', text: DXF_IDENTIFICATION_PROMPT });
+  const prompt = `${DXF_TEXT_ANALYSIS_PROMPT}
 
-  const identResp = await fetch('https://api.anthropic.com/v1/messages', {
+=== נתוני הוקטור מהקובץ ===
+${vectorSummary}
+=== סוף נתוני הוקטור ===
+
+נתח את הנתונים הללו וזהה את כל האלמנטים הרלוונטיים לבטיחות אש.`;
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 4000, messages: [{ role: 'user', content }] })
-  });
-  const identData = await identResp.json();
-  if (identData.error) throw new Error(`Pass 1 Error: ${JSON.stringify(identData.error)}`);
-
-  const identRaw = identData.content[0].text;
-  console.log('  Pass 1 complete. Parsing identification...');
-
-  // Parse identification JSON
-  let identified;
-  try {
-    const jsonMatch = identRaw.match(/```json\n?([\s\S]*?)\n?```/) || identRaw.match(/\{[\s\S]*"identified"[\s\S]*\}/);
-    identified = JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : identRaw);
-  } catch (e) {
-    console.log('  Warning: Could not parse identification JSON, using raw text');
-    identified = { raw: identRaw, parseError: true };
-  }
-
-  console.log('  Pass 2: Scoring against Israeli regulations...');
-
-  // Pass 2: Send identified data to Claude for regulation scoring (text only)
-  const vectorStats = {
-    entityCount: vectorData.summary ? Object.values(vectorData.summary).reduce((a, b) => a + b, 0) : 0,
-    walls: vectorData.summary?.walls || 0,
-    doors: vectorData.summary?.doors || 0,
-    texts: vectorData.summary?.texts || 0,
-    layerCount: vectorData.layers?.length || 0
-  };
-
-  const scoringPrompt = buildScoringPrompt(identified, vectorStats);
-
-  const scoreResp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
       max_tokens: 8000,
-      messages: [{ role: 'user', content: scoringPrompt }]
+      messages: [{ role: 'user', content: prompt }]
     })
   });
-  const scoreData = await scoreResp.json();
-  if (scoreData.error) throw new Error(`Pass 2 Error: ${JSON.stringify(scoreData.error)}`);
 
-  const scoreRaw = scoreData.content[0].text;
-  console.log('  Pass 2 complete. Parsing final analysis...');
+  const data = await resp.json();
+  if (data.error) throw new Error(`Claude API Error: ${JSON.stringify(data.error)}`);
 
-  // Parse final analysis JSON
+  const rawText = data.content[0].text;
+  console.log('  Claude response received. Parsing JSON...');
+
+  // Parse analysis JSON
   let analysis;
   try {
-    const jsonMatch = scoreRaw.match(/```json\n?([\s\S]*?)\n?```/) || scoreRaw.match(/\{[\s\S]*"categories"[\s\S]*\}/);
-    analysis = JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : scoreRaw);
+    const jsonMatch = rawText.match(/```json\n?([\s\S]*?)\n?```/) || rawText.match(/\{[\s\S]*"categories"[\s\S]*\}/);
+    analysis = JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : rawText);
   } catch (e) {
-    analysis = { rawText: scoreRaw, parseError: true };
+    console.log('  Warning: Could not parse JSON, returning raw text');
+    analysis = { rawText, parseError: true };
   }
 
-  // Attach identification data if not already included
-  if (!analysis.identifiedElements && identified.identified) {
-    analysis.identifiedElements = identified.identified;
-  }
-
-  return { analysis, identified };
+  return analysis;
 }
 
 // ===== ROUTES =====
@@ -620,7 +571,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '16.0.0-railway'
+    version: '18.0.0-railway'
   });
 });
 
@@ -705,73 +656,22 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     const ext = path.extname(originalName).toLowerCase();
     const isDXF = ext === '.dxf';
 
-    // ===== DXF FILES: Two-pass analysis (Vision ID → Regulation Scoring) =====
+    // ===== DXF FILES: Pure text-based analysis (no images) =====
     if (isDXF) {
-      console.log('DXF file detected - using TWO-PASS analysis');
-      const sharp = require('sharp');
+      console.log('DXF file detected - using PURE TEXT analysis (no images)');
 
-      // Step 1: Render DXF to high-res PNG
-      console.log('  Rendering DXF to PNG...');
+      // Step 1: Parse DXF and extract vector summary
+      console.log('  Parsing DXF file...');
       const result = await analyzeDXF(filePath);
 
-      if (!result.pngBuffer) {
-        throw new Error('Failed to render DXF to image');
+      if (!result.vectorSummary) {
+        throw new Error('Failed to extract vector data from DXF');
       }
 
-      // Save main image for frontend display
-      const imageId = uuidv4();
-      const mainImagePath = path.join(imagesDir, `${imageId}.png`);
-      fs.writeFileSync(mainImagePath, result.pngBuffer);
-      const imageUrl = `/images/${imageId}.png`;
+      console.log(`  Extracted: ${result.parsed.entityCount} entities, ${result.parsed.textCount} texts`);
 
-      // Step 2: Split PNG into zones for detailed analysis
-      const imgMeta = await sharp(result.pngBuffer).metadata();
-      const w = imgMeta.width || 4000;
-      const h = imgMeta.height || 4000;
-
-      console.log(`  DXF rendered image: ${w}x${h}`);
-
-      // Create 6 zones (2x3 grid for better detail)
-      const zones = [];
-      const zoneUrls = [];
-      const zoneW = Math.floor(w / 3);
-      const zoneH = Math.floor(h / 2);
-
-      const zoneLabels = [
-        ['עליון שמאלי', 'עליון אמצעי', 'עליון ימני'],
-        ['תחתון שמאלי', 'תחתון אמצעי', 'תחתון ימני']
-      ];
-
-      for (let row = 0; row < 2; row++) {
-        for (let col = 0; col < 3; col++) {
-          try {
-            const zoneBuffer = await sharp(result.pngBuffer)
-              .extract({
-                left: col * zoneW,
-                top: row * zoneH,
-                width: Math.min(zoneW, w - col * zoneW),
-                height: Math.min(zoneH, h - row * zoneH)
-              })
-              .sharpen({ sigma: 1.0 })
-              .png()
-              .toBuffer();
-
-            const zonePath = path.join(imagesDir, `${imageId}_zone${zones.length}.png`);
-            fs.writeFileSync(zonePath, zoneBuffer);
-
-            zones.push({ buffer: zoneBuffer, label: zoneLabels[row][col] });
-            zoneUrls.push({ url: `/images/${imageId}_zone${zones.length - 1}.png`, label: zoneLabels[row][col] });
-          } catch (e) {
-            console.log(`  Failed to extract zone ${row},${col}:`, e.message);
-          }
-        }
-      }
-
-      console.log(`  Created ${zones.length} zones for analysis`);
-
-      // Step 3: Two-pass analysis (Vision identification → Regulation scoring)
-      const imageBuffers = { fullImage: result.pngBuffer, zones };
-      const { analysis, identified } = await analyzeDXFTwoPass(imageBuffers, result.vectorData);
+      // Step 2: Send vector summary to Claude (text API, no images)
+      const analysis = await analyzeDXFText(result.vectorSummary);
 
       // Cleanup temp files
       try { fs.unlinkSync(req.file.path); } catch(e) {}
@@ -782,14 +682,19 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
         success: true,
         filename: originalName,
         analysis,
-        identified, // Include what Claude Vision identified
-        analysisMethod: 'two-pass-vision',
-        vectorData: result.vectorData,
-        imageUrl,
-        zoneUrls,
-        sourceType: 'vector-dxf-twopass',
+        analysisMethod: 'text-vector',
+        vectorData: {
+          entityCount: result.parsed.entityCount,
+          textCount: result.parsed.textCount,
+          circleCount: result.parsed.circleCount,
+          arcCount: result.parsed.arcCount,
+          blockCount: result.parsed.blockCount,
+          layerCount: result.parsed.layerCount,
+          bounds: result.parsed.bounds
+        },
+        // No imageUrl or zoneUrls - pure text analysis
+        sourceType: 'vector-dxf-text',
         sourceDimensions: `${result.parsed.entityCount} entities`,
-        outputDimensions: `${w}x${h}`,
         processingTime: `${((Date.now() - startTime) / 1000).toFixed(1)}s`
       });
     }
@@ -877,5 +782,5 @@ app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 16.0.0-railway`);
+  console.log(`   Version: 18.0.0-railway`);
 });
