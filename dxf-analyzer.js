@@ -1,4 +1,4 @@
-// dxf-analyzer.js v5 - Ultra memory-optimized for 1M+ entity DXF files
+// dxf-analyzer.js v6 - Fixed layer preservation during block expansion
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -11,18 +11,17 @@ const MAX_ENTITIES_FOR_SVG = 200000;
 // ============ STREAMING PARSER ============
 async function parseDXFStreaming(filePath) {
   return new Promise((resolve, reject) => {
-    console.log('  Starting streaming parse (memory-optimized)...');
+    console.log('  Starting streaming parse v6 (layer-preserving)...');
 
     const fileStream = fs.createReadStream(filePath, {
       encoding: 'utf8',
-      highWaterMark: 64 * 1024 // 64KB chunks
+      highWaterMark: 64 * 1024
     });
     const rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity
     });
 
-    // State machine - minimal memory footprint
     let pendingCode = null;
     let currentSection = null;
     let inBlock = false;
@@ -31,38 +30,25 @@ async function parseDXFStreaming(filePath) {
     let currentBlockBaseY = 0;
     let blockEntities = [];
 
-    // Storage - only keep what we need
     const blocks = {};
     const entities = [];
     const layers = {};
 
-    // Entity parsing state
     let parsingEntity = false;
     let entityType = null;
     let entityData = {};
     let entityVerts = [];
     let curVx = null;
 
-    // Debug: track first entities
-    let debugEntities = [];
-    const DEBUG_LIMIT = 20;
-
-    // Section tracking
     let expectSectionName = false;
-
-    // Layers parsing state
     let parsingLayer = false;
     let layerData = {};
-
-    // Entity count tracking
-    let rawEntityCount = 0;
 
     const ENTITY_TYPES = new Set(['LINE', 'CIRCLE', 'ARC', 'TEXT', 'MTEXT', 'INSERT', 'LWPOLYLINE', 'POLYLINE', 'SOLID', 'ELLIPSE', 'POINT', 'SPLINE']);
 
     function finalizeEntity() {
       if (!parsingEntity || !entityType) return;
 
-      // Finalize polyline vertices
       if ((entityType === 'LWPOLYLINE' || entityType === 'POLYLINE') && curVx !== null) {
         entityVerts.push({ x: curVx, y: 0 });
       }
@@ -72,24 +58,12 @@ async function parseDXFStreaming(filePath) {
 
       entityData.type = entityType;
 
-      // Debug: capture first entities
-      if (debugEntities.length < DEBUG_LIMIT) {
-        debugEntities.push({
-          type: entityData.type,
-          layer: entityData.layer || '(none)',
-          text: entityData.text || null,
-          blockName: entityData.blockName || null
-        });
-      }
-
       if (inBlock && currentBlockName) {
         blockEntities.push(entityData);
       } else if (currentSection === 'ENTITIES') {
         entities.push(entityData);
-        rawEntityCount++;
       }
 
-      // Reset
       parsingEntity = false;
       entityType = null;
       entityData = {};
@@ -98,7 +72,6 @@ async function parseDXFStreaming(filePath) {
     }
 
     function processToken(code, value) {
-      // Section handling
       if (code === 0) {
         if (value === 'SECTION') {
           expectSectionName = true;
@@ -114,7 +87,6 @@ async function parseDXFStreaming(filePath) {
           return;
         }
 
-        // Block handling
         if (currentSection === 'BLOCKS') {
           if (value === 'BLOCK') {
             finalizeEntity();
@@ -129,7 +101,7 @@ async function parseDXFStreaming(filePath) {
             finalizeEntity();
             if (currentBlockName) {
               blocks[currentBlockName] = {
-                entities: blockEntities,
+                entities: blockEntities.slice(), // Copy array
                 baseX: currentBlockBaseX,
                 baseY: currentBlockBaseY
               };
@@ -141,7 +113,6 @@ async function parseDXFStreaming(filePath) {
           }
         }
 
-        // Layer handling in TABLES
         if (currentSection === 'TABLES') {
           if (value === 'LAYER') {
             parsingLayer = true;
@@ -157,7 +128,6 @@ async function parseDXFStreaming(filePath) {
           }
         }
 
-        // Entity parsing
         if (ENTITY_TYPES.has(value)) {
           finalizeEntity();
           parsingEntity = true;
@@ -171,14 +141,12 @@ async function parseDXFStreaming(filePath) {
         return;
       }
 
-      // Section name capture
       if (expectSectionName && code === 2) {
         currentSection = value;
         expectSectionName = false;
         return;
       }
 
-      // Block properties
       if (inBlock && !parsingEntity) {
         if (code === 2) currentBlockName = value;
         else if (code === 10) currentBlockBaseX = parseFloat(value);
@@ -186,7 +154,6 @@ async function parseDXFStreaming(filePath) {
         return;
       }
 
-      // Layer properties
       if (parsingLayer) {
         if (code === 2) layerData.name = value;
         else if (code === 62) layerData.color = parseInt(value);
@@ -194,7 +161,6 @@ async function parseDXFStreaming(filePath) {
         return;
       }
 
-      // Entity properties
       if (parsingEntity) {
         if (code === 8) entityData.layer = value;
         else if (code === 6) entityData.linetype = value;
@@ -230,12 +196,9 @@ async function parseDXFStreaming(filePath) {
 
     rl.on('line', (line) => {
       const trimmed = line.trim();
-
       if (pendingCode === null) {
         const code = parseInt(trimmed);
-        if (!isNaN(code)) {
-          pendingCode = code;
-        }
+        if (!isNaN(code)) pendingCode = code;
       } else {
         processToken(pendingCode, trimmed);
         pendingCode = null;
@@ -245,24 +208,68 @@ async function parseDXFStreaming(filePath) {
     rl.on('close', () => {
       finalizeEntity();
 
-      // Debug output
-      console.log('  DEBUG: First ' + debugEntities.length + ' entities:');
-      debugEntities.forEach((e, i) => {
-        console.log('    [' + i + '] type=' + e.type + ', layer=' + e.layer +
-          (e.text ? ', text=' + e.text.substring(0, 30) : '') +
-          (e.blockName ? ', block=' + e.blockName : ''));
+      // ========== DEBUG: BLOCKS SECTION ==========
+      const blockNames = Object.keys(blocks);
+      console.log('\n  ===== DEBUG: BLOCKS SECTION =====');
+      console.log('  Total blocks: ' + blockNames.length);
+
+      blockNames.slice(0, 10).forEach(bname => {
+        const b = blocks[bname];
+        console.log('\n  BLOCK: "' + bname + '" (' + b.entities.length + ' entities, base: ' + b.baseX.toFixed(2) + ',' + b.baseY.toFixed(2) + ')');
+
+        // Show first 10 entities in this block
+        b.entities.slice(0, 10).forEach((ent, i) => {
+          console.log('    [' + i + '] type=' + ent.type +
+            ', layer="' + (ent.layer || '(none)') + '"' +
+            (ent.text ? ', text="' + ent.text.substring(0, 20) + '"' : '') +
+            (ent.blockName ? ', block="' + ent.blockName + '"' : ''));
+        });
+        if (b.entities.length > 10) {
+          console.log('    ... and ' + (b.entities.length - 10) + ' more entities');
+        }
       });
 
-      console.log('  Raw parse: ' + entities.length + ' entities, ' +
+      // ========== DEBUG: LAYER TABLE ==========
+      console.log('\n  ===== DEBUG: LAYER TABLE =====');
+      const layerNames = Object.keys(layers);
+      console.log('  Total layers defined: ' + layerNames.length);
+      layerNames.slice(0, 30).forEach(lname => {
+        const l = layers[lname];
+        console.log('    Layer: "' + lname + '" color=' + l.color + ' ltype=' + l.ltype);
+      });
+      if (layerNames.length > 30) {
+        console.log('    ... and ' + (layerNames.length - 30) + ' more layers');
+      }
+
+      // ========== DEBUG: INSERT ENTITIES ==========
+      console.log('\n  ===== DEBUG: INSERT ENTITIES (before expansion) =====');
+      const inserts = entities.filter(e => e.type === 'INSERT');
+      console.log('  Total INSERT entities: ' + inserts.length);
+      inserts.slice(0, 20).forEach((ins, i) => {
+        console.log('    [' + i + '] block="' + ins.blockName +
+          '", layer="' + (ins.layer || '0') +
+          '", pos=(' + (ins.x || 0).toFixed(2) + ',' + (ins.y || 0).toFixed(2) + ')' +
+          ', scale=(' + (ins.scaleX || 1) + ',' + (ins.scaleY || 1) + ')' +
+          ', rot=' + (ins.rotation || 0));
+      });
+      if (inserts.length > 20) {
+        console.log('    ... and ' + (inserts.length - 20) + ' more INSERTs');
+      }
+
+      console.log('\n  Raw parse: ' + entities.length + ' entities, ' +
         Object.keys(blocks).length + ' blocks, ' +
         Object.keys(layers).length + ' layers');
 
-      // Expand block references with hard limit
+      // ========== BLOCK EXPANSION WITH LAYER INHERITANCE ==========
       const expanded = [];
       let expandedCount = 0;
       let truncated = false;
 
-      function expand(ents, ox, oy, sx, sy, depth) {
+      // Track layer inheritance stats
+      let inheritedLayers = 0;
+      let ownLayers = 0;
+
+      function expand(ents, ox, oy, sx, sy, depth, parentLayer) {
         if (depth > 5) return;
         if (truncated) return;
 
@@ -274,19 +281,37 @@ async function parseDXFStreaming(filePath) {
           }
 
           const ent = ents[i];
+
           if (ent.type === 'INSERT' && blocks[ent.blockName]) {
             const b = blocks[ent.blockName];
             const isx = (ent.scaleX || 1) * sx;
             const isy = (ent.scaleY || 1) * sy;
+
+            // Pass down the INSERT's layer as parent layer for nested entities
+            // If INSERT has layer "0", use the parent's layer instead
+            const insertLayer = (ent.layer && ent.layer !== '0') ? ent.layer : parentLayer;
+
             expand(b.entities,
-              (ent.x || 0) + ox - b.baseX * isx,
-              (ent.y || 0) + oy - b.baseY * isy,
-              isx, isy, depth + 1);
+              (ent.x || 0) * sx + ox - b.baseX * isx,
+              (ent.y || 0) * sy + oy - b.baseY * isy,
+              isx, isy, depth + 1, insertLayer);
           } else {
-            // Clone entity with transformed coordinates
+            // CRITICAL: Determine the correct layer
+            // Priority: entity's own layer (if not "0") > parent INSERT's layer > "0"
+            let finalLayer;
+            if (ent.layer && ent.layer !== '0') {
+              finalLayer = ent.layer;
+              ownLayers++;
+            } else if (parentLayer && parentLayer !== '0') {
+              finalLayer = parentLayer;
+              inheritedLayers++;
+            } else {
+              finalLayer = ent.layer || '0';
+            }
+
             const e = {
               type: ent.type,
-              layer: ent.layer,
+              layer: finalLayer,
               linetype: ent.linetype,
               color: ent.color
             };
@@ -320,11 +345,27 @@ async function parseDXFStreaming(filePath) {
         }
       }
 
-      expand(entities, 0, 0, 1, 1, 0);
+      // Start expansion with no parent layer
+      expand(entities, 0, 0, 1, 1, 0, null);
 
+      console.log('\n  ===== EXPANSION RESULTS =====');
       console.log('  Expanded: ' + expanded.length + ' entities' + (truncated ? ' (TRUNCATED)' : ''));
+      console.log('  Entities with own layer: ' + ownLayers);
+      console.log('  Entities inheriting parent layer: ' + inheritedLayers);
 
-      // Free raw entities immediately
+      // Debug: Show layer distribution after expansion
+      const layerCounts = {};
+      expanded.forEach(e => {
+        const l = e.layer || '0';
+        layerCounts[l] = (layerCounts[l] || 0) + 1;
+      });
+      const sortedLayers = Object.entries(layerCounts).sort((a, b) => b[1] - a[1]);
+      console.log('\n  ===== LAYER DISTRIBUTION (after expansion) =====');
+      console.log('  Unique layers: ' + sortedLayers.length);
+      sortedLayers.slice(0, 30).forEach(([name, count]) => {
+        console.log('    "' + name + '": ' + count);
+      });
+
       entities.length = 0;
 
       resolve({
@@ -452,14 +493,7 @@ function classifyEntities(parsed) {
     if (matched) C.stats.classified++;
   }
 
-  // Log top layers
-  const sortedLayers = Object.entries(C.stats.byLayer)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 20);
-  console.log('  Top 20 layers:');
-  sortedLayers.forEach(([name, count]) => {
-    console.log('    ' + name + ': ' + count);
-  });
+  console.log('  Classified: ' + C.stats.classified + '/' + C.stats.total);
 
   return C;
 }
@@ -556,13 +590,11 @@ function checkFireSafetyRules(classified, geometry) {
   const scores = [];
   const avg = (a) => a.length ? a.reduce((s, v) => s + v, 0) / a.length : null;
 
-  // Category 1
   const ac = classified.accessRoads.length;
   let s1 = ac > 0 ? 70 : 20;
   R.categories.push({ id: 1, nameHe: 'דרכי גישה', status: ac > 0 ? 'דורש_בדיקה' : 'נכשל', score: s1, findings: [ac + ' אלמנטי גישה'], recommendations: ac === 0 ? ['לסמן דרך גישה 3.5מ'] : [] });
   scores.push(s1);
 
-  // Category 2
   const exitC = classified.exits.length + classified.stairs.length;
   const maxT = geometry.maxTravelDistances.length ? Math.max(...geometry.maxTravelDistances) : null;
   let s2 = 50;
@@ -575,7 +607,6 @@ function checkFireSafetyRules(classified, geometry) {
   R.categories.push({ id: 2, nameHe: 'דרכי מילוט ויציאות', status: s2 >= 70 ? 'עובר' : s2 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, Math.max(0, s2)), findings: f2, recommendations: r2 });
   scores.push(s2);
 
-  // Category 3
   let s3 = 20;
   if (classified.smokeDetectors.length > 0) s3 += 25;
   if (classified.heatDetectors.length > 0) s3 += 10;
@@ -587,7 +618,6 @@ function checkFireSafetyRules(classified, geometry) {
   R.categories.push({ id: 3, nameHe: 'מערכת גילוי', status: s3 >= 70 ? 'עובר' : s3 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s3), findings: f3, recommendations: classified.smokeDetectors.length === 0 ? ['להוסיף גלאי עשן'] : [] });
   scores.push(s3);
 
-  // Category 4
   let s4 = classified.sprinklers.length > 0 ? 50 : 10;
   const aspr = avg(geometry.sprinklerSpacing);
   if (aspr && aspr <= 4.5) s4 += 30;
@@ -597,7 +627,6 @@ function checkFireSafetyRules(classified, geometry) {
   R.categories.push({ id: 4, nameHe: 'מערכת מתזים', status: s4 >= 70 ? 'עובר' : s4 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s4), findings: f4, recommendations: classified.sprinklers.length === 0 ? ['לבדוק חובת מתזים'] : [] });
   scores.push(s4);
 
-  // Category 5
   let s5 = 20;
   if (classified.fireExtinguishers.length > 0) s5 += 25;
   if (classified.hydrants.length > 0) s5 += 25;
@@ -612,27 +641,23 @@ function checkFireSafetyRules(classified, geometry) {
   R.categories.push({ id: 5, nameHe: 'ציוד כיבוי', status: s5 >= 70 ? 'עובר' : s5 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s5), findings: f5, recommendations: r5 });
   scores.push(s5);
 
-  // Category 6
   let s6 = 30;
   if (classified.fireWalls.length > 0) s6 += 30;
   if (classified.fireDoors.length > 0) s6 += 20;
   R.categories.push({ id: 6, nameHe: 'הפרדות אש', status: s6 >= 70 ? 'עובר' : s6 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: s6, findings: ['קירות אש: ' + classified.fireWalls.length, 'דלתות אש: ' + classified.fireDoors.length], recommendations: classified.fireWalls.length === 0 ? ['לסמן קירות אש'] : [] });
   scores.push(s6);
 
-  // Category 7
   let s7 = 20;
   if (classified.emergencyLights.length > 0) s7 += 30;
   if (classified.exitSigns.length > 0) s7 += 30;
   R.categories.push({ id: 7, nameHe: 'תאורת חירום ושילוט', status: s7 >= 70 ? 'עובר' : s7 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: s7, findings: ['תאורת חירום: ' + classified.emergencyLights.length, 'שלטי יציאה: ' + classified.exitSigns.length], recommendations: [] });
   scores.push(s7);
 
-  // Category 8
   const sv = classified.smokeVents.length;
   let s8 = sv > 0 ? 60 : 15;
   R.categories.push({ id: 8, nameHe: 'שליטה בעשן', status: s8 >= 60 ? 'דורש_בדיקה' : 'נכשל', score: s8, findings: ['פתחי עשן: ' + sv], recommendations: sv === 0 ? ['מערכת שחרור עשן'] : [] });
   scores.push(s8);
 
-  // Category 9
   let s9 = 20;
   const textSample = classified.texts.slice(0, 500);
   if (textSample.some(t => /plan|תוכנית/i.test(t.text || ''))) s9 += 20;
@@ -650,7 +675,6 @@ function checkFireSafetyRules(classified, geometry) {
 
 // ============ SMART BOUNDS ============
 function computeSmartBounds(entities) {
-  // Sample for bounds calculation
   const maxSample = 50000;
   let sample = entities;
   if (entities.length > maxSample) {
@@ -722,11 +746,10 @@ function computeSmartBounds(entities) {
   return { minX: minX - padX, maxX: maxX + padX, minY: minY - padY, maxY: maxY + padY };
 }
 
-// ============ SVG RENDERER (STREAM TO FILE) ============
+// ============ SVG RENDERER ============
 async function renderToSVGFile(entities, classified, width, outputPath) {
   width = width || 4000;
 
-  // Downsample if needed
   let entitiesToRender = entities;
   if (entities.length > MAX_ENTITIES_FOR_SVG) {
     const step = Math.ceil(entities.length / MAX_ENTITIES_FOR_SVG);
@@ -761,7 +784,6 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
     exits: '#15803d', windows: '#06b6d4', unknown: '#94a3b8'
   };
 
-  // Build style map
   const styles = new Map();
   classified.walls.forEach(e => styles.set(e, { c: COL.walls, w: 2.0 }));
   classified.doors.forEach(e => styles.set(e, { c: COL.doors, w: 2.5 }));
@@ -778,20 +800,16 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
 
   const renderSkip = /^LOGO$|^IDAN_CROSS$|^POINTS$|^POINTS_BETON$/i;
 
-  // Write directly to file stream
   return new Promise((resolve, reject) => {
     const svgStream = fs.createWriteStream(outputPath);
-
     svgStream.on('error', reject);
     svgStream.on('finish', () => resolve(outputPath));
 
-    // Header
     svgStream.write('<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + totalH + '" viewBox="0 0 ' + width + ' ' + totalH + '">\n');
     svgStream.write('<rect width="100%" height="100%" fill="#fafbfc"/>\n');
     svgStream.write('<rect x="4" y="4" width="' + (width - 8) + '" height="' + (imgH - 8) + '" fill="white" stroke="#e2e8f0" rx="4"/>\n');
     svgStream.write('<defs><style>text{font-family:Arial,sans-serif}</style></defs>\n');
 
-    // Draw geometry
     for (let i = 0; i < entitiesToRender.length; i++) {
       const ent = entitiesToRender[i];
       if (markerSet.has(ent)) continue;
@@ -829,7 +847,6 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
       }
     }
 
-    // Markers
     function writeMarkers(items, color, shape) {
       for (let mi = 0; mi < items.length; mi++) {
         const e = items[mi];
@@ -861,7 +878,6 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
     writeMarkers(classified.exitSigns, COL.exitSigns, 't');
     writeMarkers(classified.smokeVents, COL.smokeVents, 'd');
 
-    // Legend
     const ly = imgH + 6;
     svgStream.write('<rect x="4" y="' + ly + '" width="' + (width - 8) + '" height="' + (legH - 10) + '" fill="white" stroke="#e2e8f0" rx="4"/>\n');
     svgStream.write('<text x="' + (width / 2) + '" y="' + (ly + 18) + '" text-anchor="middle" fill="#1e293b" font-size="12" font-weight="bold">מקרא - Legend</text>\n');
@@ -889,24 +905,17 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
 
 // ============ MAIN ============
 async function analyzeDXF(filePath) {
-  console.log('Vector DXF analysis v5 (ultra memory-optimized)...');
+  console.log('Vector DXF analysis v6 (layer-preserving)...');
   console.log('  Memory limits: ' + MAX_ENTITIES_AFTER_EXPANSION + ' entities max, ' + MAX_ENTITIES_FOR_SVG + ' for SVG');
 
-  // Parse with streaming
   let parsed = await parseDXFStreaming(filePath);
   console.log('  Entities: ' + parsed.entities.length + ', Blocks: ' + parsed.blockCount + ', Layers: ' + Object.keys(parsed.layers).length);
 
-  // Classify
   let classified = classifyEntities(parsed);
-  console.log('  Classified: ' + classified.stats.classified + '/' + classified.stats.total);
 
-  // Analyze geometry
   const geometry = analyzeGeometry(classified);
-
-  // Check rules
   const analysis = checkFireSafetyRules(classified, geometry);
 
-  // Store counts before freeing
   const entityCount = parsed.entities.length;
   const blockCount = parsed.blockCount;
   const layerCount = Object.keys(parsed.layers).length;
@@ -932,19 +941,16 @@ async function analyzeDXF(filePath) {
     }
   };
 
-  // Render SVG to temp file
   const tmpDir = os.tmpdir();
   const svgPath = path.join(tmpDir, 'dxf_render_' + Date.now() + '.svg');
 
   await renderToSVGFile(parsed.entities, classified, 4000, svgPath);
   console.log('  SVG written to: ' + svgPath);
 
-  // Free entities immediately after SVG render
   parsed.entities = null;
   parsed.blocks = null;
   parsed = null;
 
-  // Free classified arrays (keep only stats)
   classified.walls = null;
   classified.doors = null;
   classified.fireDoors = null;
@@ -970,13 +976,11 @@ async function analyzeDXF(filePath) {
   classified.unknown = null;
   classified = null;
 
-  // Hint to GC
   if (global.gc) {
     global.gc();
     console.log('  Manual GC triggered');
   }
 
-  // Convert SVG file to PNG
   let pngBuffer = null;
   let svg = null;
 
@@ -984,13 +988,10 @@ async function analyzeDXF(filePath) {
     const sharp = require('sharp');
     pngBuffer = await sharp(svgPath).png({ compressionLevel: 6 }).toBuffer();
     console.log('  PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB');
-
-    // Read SVG for response (smaller than keeping in memory during render)
     svg = fs.readFileSync(svgPath, 'utf8');
     console.log('  SVG: ' + (svg.length / 1024).toFixed(0) + 'KB');
   } catch (e) {
     console.log('  sharp/svg error: ' + e.message);
-    // Try to read SVG anyway
     try {
       svg = fs.readFileSync(svgPath, 'utf8');
     } catch (e2) {
@@ -998,12 +999,9 @@ async function analyzeDXF(filePath) {
     }
   }
 
-  // Clean up temp file
   try {
     fs.unlinkSync(svgPath);
-  } catch (e) {
-    // Ignore cleanup errors
-  }
+  } catch (e) {}
 
   return {
     analysis: analysis,
