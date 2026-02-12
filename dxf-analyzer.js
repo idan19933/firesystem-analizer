@@ -1,4 +1,4 @@
-// dxf-analyzer.js v6 - Fixed layer preservation during block expansion
+// dxf-analyzer.js v7 - Geometry-based classification for flattened DXF files
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -11,7 +11,7 @@ const MAX_ENTITIES_FOR_SVG = 200000;
 // ============ STREAMING PARSER ============
 async function parseDXFStreaming(filePath) {
   return new Promise((resolve, reject) => {
-    console.log('  Starting streaming parse v6 (layer-preserving)...');
+    console.log('  Starting streaming parse v7 (geometry-based)...');
 
     const fileStream = fs.createReadStream(filePath, {
       encoding: 'utf8',
@@ -366,6 +366,32 @@ async function parseDXFStreaming(filePath) {
         console.log('    "' + name + '": ' + count);
       });
 
+      // ========== DEBUG: ALL TEXT CONTENT ==========
+      const allTexts = expanded
+        .filter(e => e.type === 'TEXT' || e.type === 'MTEXT')
+        .map(e => e.text)
+        .filter(Boolean);
+      const uniqueTexts = [...new Set(allTexts)];
+      console.log('\n  ===== DEBUG: TEXT CONTENT IN FILE =====');
+      console.log('  Total text entities: ' + allTexts.length);
+      console.log('  Unique text values: ' + uniqueTexts.length);
+      console.log('  First 100 unique texts:');
+      uniqueTexts.slice(0, 100).forEach((txt, i) => {
+        // Truncate long texts for logging
+        const display = txt.length > 60 ? txt.substring(0, 60) + '...' : txt;
+        console.log('    [' + i + '] "' + display + '"');
+      });
+
+      // Log fire-safety related texts specifically
+      const fireKeywords = /אש|כיבוי|מטף|ספרינק|גלאי|עשן|יציאה|מילוט|חירום|EXIT|FIRE|SD|FE|IH|SPR|SMOKE|SPRINK|EXTINGU|HYDRANT|ALARM|DETECT/i;
+      const fireTexts = uniqueTexts.filter(t => fireKeywords.test(t));
+      if (fireTexts.length > 0) {
+        console.log('\n  Fire-safety related texts found (' + fireTexts.length + '):');
+        fireTexts.slice(0, 30).forEach(txt => {
+          console.log('    * "' + txt + '"');
+        });
+      }
+
       entities.length = 0;
 
       resolve({
@@ -382,7 +408,7 @@ async function parseDXFStreaming(filePath) {
   });
 }
 
-// ============ CLASSIFIER ============
+// ============ CLASSIFIER (v7 - Geometry & Text based for flattened DXF) ============
 function classifyEntities(parsed) {
   const C = {
     walls: [], doors: [], fireDoors: [], windows: [], stairs: [], elevators: [],
@@ -393,7 +419,45 @@ function classifyEntities(parsed) {
     stats: { total: 0, classified: 0, byLayer: {}, byType: {} }
   };
 
-  const LP = {
+  // Check if this is a flattened file (mostly layer "0")
+  const layerCounts = {};
+  parsed.entities.forEach(e => {
+    const l = e.layer || '0';
+    layerCounts[l] = (layerCounts[l] || 0) + 1;
+  });
+  const layer0Count = layerCounts['0'] || 0;
+  const isFlattened = layer0Count > parsed.entities.length * 0.9;
+
+  console.log('  Classification mode: ' + (isFlattened ? 'GEOMETRY-BASED (flattened file)' : 'LAYER-BASED'));
+
+  // ===== STEP 1: Collect all text entities and build spatial index =====
+  const textEntities = [];
+  const textPositions = []; // For spatial proximity search
+
+  // Text patterns for classification
+  const TEXT_PATTERNS = {
+    sprinklers: /ספרינק|מתז|SPRINK|SPR[-_]?\d|^S\d+$|^S$/i,
+    smokeDetectors: /גלאי.?עשן|עשן|SMOKE|SD[-_]?\d|^SD$/i,
+    heatDetectors: /גלאי.?חום|חום|HEAT|HD[-_]?\d|^HD$/i,
+    fireExtinguishers: /מטף|מטפה|כיבוי|EXTING|FE[-_]?\d|^FE$/i,
+    hydrants: /הידרנט|ברז.?כיבוי|ברז.?אש|HYDRANT|IH[-_]?\d|^IH$|^FH$/i,
+    exits: /יציאה|יציאת.?חירום|מוצא|EXIT/i,
+    exitSigns: /שלט.?יציאה|EXIT.?SIGN/i,
+    emergencyLights: /תאורת.?חירום|תאורה.?חירום|אור.?חירום|EMERGENCY|EC[-_]?\d/i,
+    stairs: /מדרגות|חדר.?מדרגות|STAIR/i,
+    fireDoors: /דלת.?אש|אש.?דלת|FIRE.?DOOR|FD[-_]?\d/i,
+    doors: /דלת|DOOR|^D\d+$/i,
+    fireAlarmPanel: /רכזת|לוח.?בקרה|ALARM.?PANEL|FACP/i,
+    manualCallPoints: /לחצן.?אש|MCP|CALL.?POINT/i,
+    smokeVents: /שחרור.?עשן|פתח.?עשן|SMOKE.?VENT|SV[-_]?\d/i,
+    fireWalls: /קיר.?אש|FIRE.?WALL/i,
+    accessRoads: /דרך.?גישה|גישה.?כבאות|ACCESS|FIRE.?LANE/i,
+    elevators: /מעלית|ELEV|LIFT/i,
+    windows: /חלון|WINDOW/i
+  };
+
+  // Layer patterns (still used if layers exist)
+  const LAYER_PATTERNS = {
     walls: /wall|קיר|A[-_]?WALL|^KIR$|WALL[-_]/i,
     doors: /^door|דלת|A[-_]?DOOR|^DELET$|DOOR[-_]/i,
     fireDoors: /fire.?door|דלת.?אש|FD[-_]/i,
@@ -414,36 +478,9 @@ function classifyEntities(parsed) {
     accessRoads: /access|גישה|FIRE[-_]ACC|^KVISH$|^DEREH|ROAD/i
   };
 
-  const TP = {
-    doors: /door|דלת/i,
-    fireDoors: /fire.?door|דלת.?אש|FD[-_]?\d/i,
-    exits: /exit|יציאה|מוצא/i,
-    stairs: /stair|מדרגות/i,
-    sprinklers: /^S$|sprink|מתז/i,
-    smokeDetectors: /^SD$|גלאי.?עשן/i,
-    fireExtinguishers: /^FE$|מטפ/i,
-    hydrants: /^IH$|^EH$|הידרנט|ברז/i,
-    emergencyLights: /^EC$|חירום/i,
-    exitSigns: /^EXIT$/i,
-    smokeVents: /^SV$/i,
-    rooms: /office|משרד|חדר|room/i
-  };
-
-  const BP = {
-    doors: /door|DR[-_]/i,
-    fireDoors: /FD[-_]/i,
-    sprinklers: /sprink|SPR[-_]/i,
-    smokeDetectors: /SD[-_]|DETECT/i,
-    fireExtinguishers: /FE[-_]/i,
-    hydrants: /HYD[-_]|IH[-_]/i,
-    stairs: /STAIR/i,
-    elevators: /ELEV|LIFT/i,
-    exitSigns: /EXIT/i
-  };
-
-  const lpKeys = Object.keys(LP);
-  const tpKeys = Object.keys(TP);
-  const bpKeys = Object.keys(BP);
+  // ===== STEP 2: First pass - collect texts and classify by text content =====
+  const textPatternKeys = Object.keys(TEXT_PATTERNS);
+  const layerPatternKeys = Object.keys(LAYER_PATTERNS);
 
   for (let i = 0; i < parsed.entities.length; i++) {
     const ent = parsed.entities[i];
@@ -453,47 +490,245 @@ function classifyEntities(parsed) {
     C.stats.byLayer[layer] = (C.stats.byLayer[layer] || 0) + 1;
     C.stats.byType[ent.type] = (C.stats.byType[ent.type] || 0) + 1;
 
-    let matched = false;
-
-    for (let li = 0; li < lpKeys.length && !matched; li++) {
-      if (LP[lpKeys[li]].test(ent.layer || '')) {
-        C[lpKeys[li]].push(ent);
-        matched = true;
-      }
-    }
-
-    if (!matched && (ent.type === 'TEXT' || ent.type === 'MTEXT') && ent.text) {
+    // Collect text entities
+    if ((ent.type === 'TEXT' || ent.type === 'MTEXT') && ent.text) {
       C.texts.push(ent);
-      for (let ti = 0; ti < tpKeys.length && !matched; ti++) {
-        if (TP[tpKeys[ti]].test(ent.text)) {
-          C[tpKeys[ti]].push(ent);
+      textEntities.push(ent);
+      if (ent.x !== undefined) {
+        textPositions.push({ x: ent.x, y: ent.y, text: ent.text, ent: ent });
+      }
+
+      // Classify text by content
+      let matched = false;
+      for (let ti = 0; ti < textPatternKeys.length && !matched; ti++) {
+        const key = textPatternKeys[ti];
+        if (TEXT_PATTERNS[key].test(ent.text)) {
+          C[key].push(ent);
+          C.stats.classified++;
+          matched = true;
+        }
+      }
+      continue; // Text entities handled
+    }
+  }
+
+  console.log('  Found ' + textEntities.length + ' text entities for proximity classification');
+
+  // ===== STEP 3: Build spatial index of fire-safety related texts =====
+  const fireTextPositions = textPositions.filter(tp => {
+    const t = tp.text;
+    return /ספרינק|מתז|גלאי|עשן|חום|מטף|הידרנט|ברז|יציאה|חירום|אש|SPRINK|SMOKE|HEAT|FIRE|EXIT|FE|SD|HD|IH|SPR/i.test(t);
+  });
+  console.log('  Fire-safety text markers for proximity: ' + fireTextPositions.length);
+
+  // Helper: find nearest text to a point
+  function findNearestFireText(x, y, maxDist) {
+    let nearest = null;
+    let minDist = maxDist;
+    for (let i = 0; i < fireTextPositions.length; i++) {
+      const tp = fireTextPositions[i];
+      const d = Math.hypot(x - tp.x, y - tp.y);
+      if (d < minDist) {
+        minDist = d;
+        nearest = tp;
+      }
+    }
+    return nearest;
+  }
+
+  // ===== STEP 4: Second pass - classify geometry =====
+  for (let i = 0; i < parsed.entities.length; i++) {
+    const ent = parsed.entities[i];
+
+    // Skip already-processed text entities
+    if (ent.type === 'TEXT' || ent.type === 'MTEXT') continue;
+
+    let matched = false;
+    const layer = ent.layer || '0';
+
+    // Try layer-based classification first (if not flattened)
+    if (!isFlattened && layer !== '0') {
+      for (let li = 0; li < layerPatternKeys.length && !matched; li++) {
+        const key = layerPatternKeys[li];
+        if (LAYER_PATTERNS[key].test(layer)) {
+          C[key].push(ent);
+          C.stats.classified++;
           matched = true;
         }
       }
     }
 
-    if (!matched && ent.type === 'INSERT' && ent.blockName) {
-      for (let bi = 0; bi < bpKeys.length && !matched; bi++) {
-        if (BP[bpKeys[bi]].test(ent.blockName)) {
-          C[bpKeys[bi]].push(ent);
+    if (matched) continue;
+
+    // ===== GEOMETRY-BASED CLASSIFICATION =====
+
+    // Small circles = likely sprinklers or detectors
+    if (ent.type === 'CIRCLE' && ent.radius !== undefined) {
+      const r = ent.radius;
+
+      // Very small circles (< 0.3 units) = sprinklers/detectors
+      if (r < 0.3 && r > 0.01) {
+        // Check proximity to fire-related text
+        if (ent.x !== undefined) {
+          const nearText = findNearestFireText(ent.x, ent.y, 5); // 5 unit radius
+          if (nearText) {
+            if (/ספרינק|מתז|SPRINK|SPR/i.test(nearText.text)) {
+              C.sprinklers.push(ent);
+              C.stats.classified++;
+              matched = true;
+            } else if (/גלאי.?עשן|עשן|SMOKE|SD/i.test(nearText.text)) {
+              C.smokeDetectors.push(ent);
+              C.stats.classified++;
+              matched = true;
+            } else if (/גלאי.?חום|חום|HEAT|HD/i.test(nearText.text)) {
+              C.heatDetectors.push(ent);
+              C.stats.classified++;
+              matched = true;
+            }
+          }
+          // If no nearby text but small circle, assume sprinkler (common in fire plans)
+          if (!matched && r < 0.15) {
+            C.sprinklers.push(ent);
+            C.stats.classified++;
+            matched = true;
+          }
+        }
+      }
+
+      // Medium circles might be other fire equipment
+      if (!matched && r >= 0.3 && r < 1.0) {
+        if (ent.x !== undefined) {
+          const nearText = findNearestFireText(ent.x, ent.y, 3);
+          if (nearText) {
+            if (/מטף|EXTING|FE/i.test(nearText.text)) {
+              C.fireExtinguishers.push(ent);
+              C.stats.classified++;
+              matched = true;
+            } else if (/הידרנט|ברז|HYDRANT|IH|FH/i.test(nearText.text)) {
+              C.hydrants.push(ent);
+              C.stats.classified++;
+              matched = true;
+            }
+          }
+        }
+      }
+    }
+
+    // Arcs near small gaps = door swings
+    if (!matched && ent.type === 'ARC' && ent.radius !== undefined) {
+      const r = ent.radius;
+      // Door swing arcs are typically 0.8-1.2m radius (90 degree swing)
+      if (r >= 0.7 && r <= 1.5) {
+        const startAngle = ent.startAngle || 0;
+        const endAngle = ent.endAngle || 0;
+        const sweep = Math.abs(endAngle - startAngle);
+        // 90-degree swing is typical for doors
+        if (sweep >= 80 && sweep <= 100) {
+          C.doors.push(ent);
+          C.stats.classified++;
           matched = true;
         }
       }
     }
 
-    if (!matched && ent.type === 'CIRCLE' && ent.radius && ent.radius < 0.5) {
-      const cl = (ent.layer || '0').toUpperCase();
-      if (/FIRE|SPRINK|SYSTEM|מתז|ספרינק/i.test(cl) && cl !== '0') {
-        C.sprinklers.push(ent);
+    // Polylines - analyze shape
+    if (!matched && (ent.type === 'LWPOLYLINE' || ent.type === 'POLYLINE') && ent.vertices && ent.vertices.length >= 3) {
+      const verts = ent.vertices;
+      const n = verts.length;
+
+      // Check if closed (last point near first point)
+      const closed = n >= 4 && Math.hypot(verts[0].x - verts[n-1].x, verts[0].y - verts[n-1].y) < 0.1;
+
+      if (closed && n === 4 || n === 5) {
+        // Calculate bounding box
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        verts.forEach(v => {
+          minX = Math.min(minX, v.x);
+          maxX = Math.max(maxX, v.x);
+          minY = Math.min(minY, v.y);
+          maxY = Math.max(maxY, v.y);
+        });
+        const w = maxX - minX;
+        const h = maxY - minY;
+
+        // Door-sized rectangle: roughly 0.8-1.2m x 0.04-0.15m (door leaf)
+        if ((w >= 0.7 && w <= 1.3 && h >= 0.03 && h <= 0.2) ||
+            (h >= 0.7 && h <= 1.3 && w >= 0.03 && w <= 0.2)) {
+          C.doors.push(ent);
+          C.stats.classified++;
+          matched = true;
+        }
+
+        // Fire extinguisher box: roughly 0.2-0.4m square
+        if (!matched && w >= 0.15 && w <= 0.5 && h >= 0.15 && h <= 0.5 && Math.abs(w - h) < 0.1) {
+          const cx = (minX + maxX) / 2;
+          const cy = (minY + maxY) / 2;
+          const nearText = findNearestFireText(cx, cy, 3);
+          if (nearText && /מטף|EXTING|FE/i.test(nearText.text)) {
+            C.fireExtinguishers.push(ent);
+            C.stats.classified++;
+            matched = true;
+          }
+        }
+      }
+
+      // Stair pattern: many short parallel segments
+      if (!matched && n >= 6) {
+        // Check if segments are roughly parallel and evenly spaced (stair treads)
+        let parallelCount = 0;
+        for (let j = 0; j < n - 2; j++) {
+          const dx1 = verts[j+1].x - verts[j].x;
+          const dy1 = verts[j+1].y - verts[j].y;
+          const dx2 = verts[j+2].x - verts[j+1].x;
+          const dy2 = verts[j+2].y - verts[j+1].y;
+          const len1 = Math.hypot(dx1, dy1);
+          const len2 = Math.hypot(dx2, dy2);
+          if (len1 > 0.1 && len2 > 0.1 && len1 < 2 && len2 < 2) {
+            // Check if roughly perpendicular (stair treads alternate direction)
+            const dot = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
+            if (Math.abs(dot) < 0.3) parallelCount++;
+          }
+        }
+        if (parallelCount >= 4) {
+          C.stairs.push(ent);
+          C.stats.classified++;
+          matched = true;
+        }
+      }
+    }
+
+    // Lines - long lines might be walls
+    if (!matched && ent.type === 'LINE' && ent.x !== undefined && ent.x2 !== undefined) {
+      const len = Math.hypot(ent.x2 - ent.x, ent.y2 - ent.y);
+      // Long lines (> 2m) are likely walls
+      if (len > 2) {
+        C.walls.push(ent);
+        C.stats.classified++;
         matched = true;
       }
     }
 
-    if (!matched) C.unknown.push(ent);
-    if (matched) C.stats.classified++;
+    if (!matched) {
+      C.unknown.push(ent);
+    }
   }
 
   console.log('  Classified: ' + C.stats.classified + '/' + C.stats.total);
+  console.log('  Classification breakdown:');
+  console.log('    Sprinklers: ' + C.sprinklers.length);
+  console.log('    Smoke detectors: ' + C.smokeDetectors.length);
+  console.log('    Heat detectors: ' + C.heatDetectors.length);
+  console.log('    Fire extinguishers: ' + C.fireExtinguishers.length);
+  console.log('    Hydrants: ' + C.hydrants.length);
+  console.log('    Doors: ' + C.doors.length);
+  console.log('    Fire doors: ' + C.fireDoors.length);
+  console.log('    Stairs: ' + C.stairs.length);
+  console.log('    Exits: ' + C.exits.length);
+  console.log('    Exit signs: ' + C.exitSigns.length);
+  console.log('    Emergency lights: ' + C.emergencyLights.length);
+  console.log('    Walls: ' + C.walls.length);
+  console.log('    Texts: ' + C.texts.length);
+  console.log('    Unknown: ' + C.unknown.length);
 
   return C;
 }
@@ -905,7 +1140,7 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
 
 // ============ MAIN ============
 async function analyzeDXF(filePath) {
-  console.log('Vector DXF analysis v6 (layer-preserving)...');
+  console.log('Vector DXF analysis v7 (geometry-based for flattened files)...');
   console.log('  Memory limits: ' + MAX_ENTITIES_AFTER_EXPANSION + ' entities max, ' + MAX_ENTITIES_FOR_SVG + ' for SVG');
 
   let parsed = await parseDXFStreaming(filePath);
