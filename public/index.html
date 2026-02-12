@@ -1,0 +1,1476 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FireCheck Pro - בודק בטיחות אש</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #f97316;
+      --primary-dark: #ea580c;
+      --success: #22c55e;
+      --warning: #eab308;
+      --danger: #ef4444;
+      --bg-dark: #0a0f1a;
+      --bg-card: #111827;
+      --bg-elevated: #1f2937;
+      --border: #374151;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --glow: rgba(249, 115, 22, 0.3);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Heebo', sans-serif;
+      background: var(--bg-dark);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    /* Animated Background */
+    .bg-gradient {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background:
+        radial-gradient(ellipse at 20% 20%, rgba(249, 115, 22, 0.08) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 80%, rgba(139, 92, 246, 0.06) 0%, transparent 50%),
+        var(--bg-dark);
+      z-index: -1;
+    }
+
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+    /* Header */
+    .header {
+      text-align: center;
+      padding: 60px 20px 50px;
+      position: relative;
+    }
+    .header::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 50%;
+      transform: translateX(-50%);
+      width: 200px; height: 3px;
+      background: linear-gradient(90deg, transparent, var(--primary), transparent);
+    }
+    .logo {
+      font-size: 3.5rem;
+      margin-bottom: 16px;
+      filter: drop-shadow(0 0 20px var(--glow));
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+    .header h1 {
+      font-size: 2.8rem;
+      font-weight: 900;
+      background: linear-gradient(135deg, #fff 0%, var(--primary) 50%, #fff 100%);
+      background-size: 200% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: shine 3s linear infinite;
+      margin-bottom: 12px;
+    }
+    @keyframes shine {
+      to { background-position: 200% center; }
+    }
+    .header p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      font-weight: 300;
+    }
+    .version-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, var(--primary), var(--danger));
+      color: #fff;
+      padding: 6px 18px;
+      border-radius: 30px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-top: 16px;
+      box-shadow: 0 4px 15px var(--glow);
+    }
+
+    /* Cards Base */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      margin-bottom: 24px;
+      transition: all 0.3s ease;
+    }
+    .card:hover {
+      border-color: var(--primary);
+      box-shadow: 0 8px 40px rgba(0,0,0,0.3), 0 0 0 1px var(--primary);
+    }
+
+    /* Upload Area */
+    .upload-area {
+      border: 2px dashed var(--border);
+      border-radius: 24px;
+      padding: 60px 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-elevated) 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    .upload-area::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: linear-gradient(135deg, var(--primary), var(--danger));
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+    .upload-area:hover, .upload-area.dragover {
+      border-color: var(--primary);
+      transform: translateY(-4px);
+      box-shadow: 0 20px 60px rgba(249, 115, 22, 0.2);
+    }
+    .upload-area:hover::before, .upload-area.dragover::before { opacity: 0.05; }
+    .upload-area .upload-content { position: relative; z-index: 1; }
+    .upload-icon {
+      width: 100px; height: 100px;
+      margin: 0 auto 24px;
+      background: linear-gradient(135deg, var(--primary), var(--danger));
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 3rem;
+      box-shadow: 0 10px 40px var(--glow);
+      animation: float 3s ease-in-out infinite;
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+    .upload-area h3 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+      color: var(--text);
+    }
+    .upload-area p { color: var(--text-muted); font-size: 1rem; margin-bottom: 8px; }
+    .upload-formats {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 20px;
+    }
+    .format-tag {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .upload-area input { display: none; }
+
+    /* Progress Section */
+    .progress-section {
+      display: none;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 36px;
+      margin-bottom: 24px;
+    }
+    .progress-section.active { display: block; animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+    .progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+    .progress-header h3 { font-size: 1.3rem; font-weight: 600; }
+    .progress-pct {
+      font-size: 2rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--primary), var(--danger));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .progress-bar {
+      height: 12px;
+      background: var(--bg-elevated);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 28px;
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+    }
+    .progress-bar .fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--primary), var(--danger), var(--primary));
+      background-size: 200% 100%;
+      border-radius: 10px;
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+      animation: shimmer 2s linear infinite;
+    }
+    @keyframes shimmer { to { background-position: 200% 0; } }
+
+    .progress-steps { display: flex; flex-direction: column; gap: 12px; }
+    .progress-step {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 16px;
+      background: var(--bg-elevated);
+      border-radius: 12px;
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      transition: all 0.3s;
+    }
+    .progress-step.active {
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.15), rgba(239, 68, 68, 0.1));
+      color: var(--primary);
+      border: 1px solid var(--primary);
+    }
+    .progress-step.done {
+      color: var(--success);
+      background: rgba(34, 197, 94, 0.1);
+    }
+    .step-icon { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; }
+    .spinner {
+      width: 20px; height: 20px;
+      border: 3px solid var(--primary);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Results Section */
+    .results-section { display: none; animation: fadeIn 0.5s ease; }
+    .results-section.active { display: block; }
+
+    /* Method Badge */
+    .method-badge-wrap {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 24px;
+    }
+    .method-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 28px;
+      border-radius: 50px;
+      font-weight: 600;
+      font-size: 1rem;
+    }
+    .method-badge.vector {
+      background: linear-gradient(135deg, #8b5cf6, #6366f1);
+      box-shadow: 0 4px 20px rgba(139, 92, 246, 0.4);
+    }
+    .method-badge.vision {
+      background: linear-gradient(135deg, #0ea5e9, #06b6d4);
+      box-shadow: 0 4px 20px rgba(14, 165, 233, 0.4);
+    }
+
+    /* Score Card */
+    .score-card {
+      background: var(--bg-card);
+      border: 2px solid var(--border);
+      border-radius: 24px;
+      padding: 48px 36px;
+      text-align: center;
+      margin-bottom: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+    .score-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 4px;
+      background: var(--border);
+    }
+    .score-card.pass::before { background: linear-gradient(90deg, var(--success), #10b981); }
+    .score-card.fail::before { background: linear-gradient(90deg, var(--danger), #dc2626); }
+    .score-card.review::before { background: linear-gradient(90deg, var(--warning), #f59e0b); }
+
+    .score-circle {
+      width: 180px; height: 180px;
+      margin: 0 auto 24px;
+      position: relative;
+    }
+    .score-circle svg { transform: rotate(-90deg); }
+    .score-circle-bg { fill: none; stroke: var(--bg-elevated); stroke-width: 12; }
+    .score-circle-fill { fill: none; stroke-width: 12; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
+    .score-card.pass .score-circle-fill { stroke: var(--success); }
+    .score-card.fail .score-circle-fill { stroke: var(--danger); }
+    .score-card.review .score-circle-fill { stroke: var(--warning); }
+
+    .score-value {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+    }
+    .score-number {
+      font-size: 3.5rem;
+      font-weight: 900;
+      line-height: 1;
+    }
+    .score-card.pass .score-number { color: var(--success); }
+    .score-card.fail .score-number { color: var(--danger); }
+    .score-card.review .score-number { color: var(--warning); }
+    .score-max { font-size: 1.2rem; color: var(--text-muted); }
+
+    .score-status {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .score-card.pass .score-status { color: var(--success); }
+    .score-card.fail .score-status { color: var(--danger); }
+    .score-card.review .score-status { color: var(--warning); }
+    .building-type { color: var(--text-muted); font-size: 1rem; }
+
+    /* Vector Data Grid */
+    .vector-section {
+      background: var(--bg-card);
+      border: 2px solid #8b5cf6;
+      border-radius: 20px;
+      padding: 28px;
+      margin-bottom: 24px;
+    }
+    .vector-section h3 {
+      color: #a78bfa;
+      font-size: 1.2rem;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .vector-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 14px;
+    }
+    .vector-item {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 14px;
+      text-align: center;
+      transition: all 0.3s;
+    }
+    .vector-item:hover { transform: translateY(-3px); border-color: #8b5cf6; }
+    .vector-item .count {
+      font-size: 2rem;
+      font-weight: 800;
+      color: #a78bfa;
+      line-height: 1;
+    }
+    .vector-item .label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+    .vector-item.highlight { border-color: var(--success); background: rgba(34, 197, 94, 0.1); }
+    .vector-item.highlight .count { color: var(--success); }
+    .vector-item.warning { border-color: var(--warning); background: rgba(234, 179, 8, 0.1); }
+    .vector-item.warning .count { color: var(--warning); }
+
+    .layers-section {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+    .layers-section h4 { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 12px; }
+    .layers-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+    .layer-tag {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-family: 'Courier New', monospace;
+    }
+
+    /* Image Section */
+    .image-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      margin-bottom: 24px;
+    }
+    .image-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .image-header h3 { font-size: 1.2rem; color: var(--primary); }
+    .source-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+    .source-badge {
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .source-badge.vector { background: linear-gradient(135deg, #8b5cf6, #6366f1); }
+    .source-badge.derivative { background: linear-gradient(135deg, #2563eb, #3b82f6); }
+    .source-badge.thumbnail { background: var(--bg-elevated); color: var(--text-muted); }
+
+    .image-wrap {
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--bg-dark);
+      cursor: zoom-in;
+      position: relative;
+    }
+    .image-wrap img { width: 100%; display: block; transition: transform 0.3s; }
+    .image-wrap:hover img { transform: scale(1.02); }
+    .image-wrap.zoomed { cursor: zoom-out; overflow: auto; max-height: 80vh; }
+    .image-wrap.zoomed img { width: auto; max-width: none; transform: none; }
+
+    .download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text);
+      text-decoration: none;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: all 0.3s;
+      margin-top: 16px;
+    }
+    .download-btn:hover { background: var(--primary); border-color: var(--primary); }
+
+    /* Categories Grid */
+    .categories-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+    .category-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px;
+      border-right: 5px solid var(--border);
+      transition: all 0.3s;
+    }
+    .category-card:hover { transform: translateY(-3px); box-shadow: 0 10px 40px rgba(0,0,0,0.2); }
+    .category-card.pass { border-right-color: var(--success); }
+    .category-card.fail { border-right-color: var(--danger); }
+    .category-card.review { border-right-color: var(--warning); }
+
+    .cat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      gap: 12px;
+    }
+    .cat-name { font-weight: 700; font-size: 1.05rem; }
+    .cat-badge {
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .cat-badge.pass { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+    .cat-badge.fail { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+    .cat-badge.review { background: rgba(234, 179, 8, 0.15); color: var(--warning); }
+
+    .cat-findings { list-style: none; }
+    .cat-findings li {
+      padding: 8px 0;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .cat-findings li:last-child { border-bottom: none; }
+    .cat-findings li::before { content: '•'; color: var(--primary); font-weight: bold; }
+    .cat-findings li.rec { color: var(--warning); }
+    .cat-findings li.rec::before { content: '💡'; }
+
+    /* Critical Issues */
+    .critical-box {
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), var(--bg-card));
+      border: 2px solid var(--danger);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .critical-box h3 { color: var(--danger); margin-bottom: 16px; font-size: 1.1rem; }
+    .critical-box ul { list-style: none; }
+    .critical-box li {
+      padding: 10px 0;
+      color: #fca5a5;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .critical-box li::before { content: '🚨'; }
+
+    /* Summary */
+    .summary-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 24px;
+    }
+    .summary-box h3 { color: var(--primary); margin-bottom: 14px; }
+    .summary-box p { color: var(--text-muted); font-size: 1rem; line-height: 1.8; }
+
+    /* Meta Bar */
+    .meta-bar {
+      display: flex;
+      gap: 24px;
+      justify-content: center;
+      flex-wrap: wrap;
+      padding: 18px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    /* Error Box */
+    .error-box {
+      display: none;
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), var(--bg-card));
+      border: 2px solid var(--danger);
+      border-radius: 16px;
+      padding: 40px;
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .error-box.active { display: block; animation: shake 0.5s ease; }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-10px); }
+      75% { transform: translateX(10px); }
+    }
+    .error-box h3 { color: var(--danger); font-size: 1.4rem; margin-bottom: 12px; }
+    .error-box p { color: #fca5a5; margin-bottom: 24px; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 14px 36px;
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: 'Heebo', sans-serif;
+      transition: all 0.3s;
+      box-shadow: 0 4px 20px var(--glow);
+    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 30px var(--glow); }
+    .btn:disabled { background: var(--bg-elevated); box-shadow: none; cursor: not-allowed; }
+
+    /* Lightbox */
+    .lightbox {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.95);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+      cursor: zoom-out;
+      backdrop-filter: blur(10px);
+    }
+    .lightbox.active { display: flex; animation: fadeIn 0.3s; }
+    .lightbox img {
+      max-width: 95vw;
+      max-height: 95vh;
+      object-fit: contain;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+
+    /* Instruction Section */
+    .instruction-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .instruction-section h4 {
+      text-align: center;
+      color: var(--primary);
+      margin-bottom: 20px;
+      font-size: 1.1rem;
+    }
+    .instruction-tabs {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .instruction-tab {
+      padding: 12px 24px;
+      background: var(--bg-elevated);
+      border: 2px solid var(--border);
+      border-radius: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-family: 'Heebo', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 500;
+      transition: all 0.3s;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .instruction-tab:hover { border-color: var(--primary); color: var(--text); }
+    .instruction-tab.active {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    /* Custom Instructions Panel */
+    .custom-instructions-panel {
+      display: none;
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+    }
+    .custom-instructions-panel.active { display: block; animation: fadeIn 0.3s; }
+
+    .saved-instructions {
+      margin-bottom: 20px;
+    }
+    .saved-instructions h5 {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 12px;
+    }
+    .saved-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .saved-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: var(--bg-elevated);
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .saved-item:hover { border-color: var(--primary); }
+    .saved-item.selected {
+      border-color: var(--success);
+      background: rgba(34, 197, 94, 0.1);
+    }
+    .saved-item-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .saved-item-name { font-weight: 500; }
+    .saved-item-date { font-size: 0.75rem; color: var(--text-dim); }
+    .saved-item-delete {
+      background: none;
+      border: none;
+      color: var(--danger);
+      cursor: pointer;
+      padding: 4px 8px;
+      font-size: 1.2rem;
+      opacity: 0.6;
+      transition: opacity 0.2s;
+    }
+    .saved-item-delete:hover { opacity: 1; }
+
+    .instruction-upload-area {
+      border: 2px dashed var(--border);
+      border-radius: 16px;
+      padding: 30px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s;
+      background: var(--bg-elevated);
+    }
+    .instruction-upload-area:hover {
+      border-color: var(--primary);
+      background: rgba(249, 115, 22, 0.05);
+    }
+    .instruction-upload-area .icon {
+      font-size: 2.5rem;
+      margin-bottom: 12px;
+    }
+    .instruction-upload-area h5 {
+      font-size: 1rem;
+      margin-bottom: 8px;
+    }
+    .instruction-upload-area p {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+    .instruction-upload-area input { display: none; }
+
+    .uploaded-file-preview {
+      display: none;
+      margin-top: 16px;
+      padding: 16px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--success);
+      border-radius: 10px;
+    }
+    .uploaded-file-preview.active { display: block; }
+    .uploaded-file-info {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .uploaded-file-name {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--success);
+    }
+    .uploaded-file-remove {
+      background: none;
+      border: none;
+      color: var(--danger);
+      cursor: pointer;
+      font-size: 1.1rem;
+    }
+    .instruction-name-input {
+      width: 100%;
+      padding: 12px 16px;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'Heebo', sans-serif;
+      font-size: 0.95rem;
+      margin-bottom: 12px;
+    }
+    .instruction-name-input:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    .instruction-name-input::placeholder { color: var(--text-dim); }
+    .save-instruction-btn {
+      width: 100%;
+      padding: 12px;
+      background: linear-gradient(135deg, var(--success), #10b981);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-family: 'Heebo', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .save-instruction-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(34, 197, 94, 0.4); }
+    .save-instruction-btn:disabled {
+      background: var(--bg-elevated);
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .use-without-save {
+      text-align: center;
+      margin-top: 12px;
+    }
+    .use-without-save button {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.85rem;
+      text-decoration: underline;
+    }
+    .use-without-save button:hover { color: var(--primary); }
+
+    .no-saved-instructions {
+      text-align: center;
+      padding: 20px;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      padding: 40px 20px;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .header h1 { font-size: 2rem; }
+      .logo { font-size: 2.5rem; }
+      .upload-area { padding: 40px 24px; }
+      .upload-icon { width: 80px; height: 80px; font-size: 2.5rem; }
+      .score-circle { width: 150px; height: 150px; }
+      .score-number { font-size: 2.8rem; }
+      .categories-grid { grid-template-columns: 1fr; }
+      .vector-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-gradient"></div>
+
+  <header class="header">
+    <div class="logo">🔥</div>
+    <h1>FireCheck Pro</h1>
+    <p>בדיקת בטיחות אש חכמה לתוכניות אדריכליות</p>
+    <span class="version-badge">גרסה 12 - וקטורי + AI</span>
+  </header>
+
+  <div class="container">
+    <!-- Instruction Selection -->
+    <section class="instruction-section" id="instructionSection">
+      <h4>בחר סוג בדיקה</h4>
+      <div class="instruction-tabs">
+        <button class="instruction-tab active" data-type="fire-safety" onclick="selectInstructionType('fire-safety')">
+          <span>🔥</span> בטיחות אש (ברירת מחדל)
+        </button>
+        <button class="instruction-tab" data-type="custom" onclick="selectInstructionType('custom')">
+          <span>📋</span> הנחיות מותאמות אישית
+        </button>
+      </div>
+
+      <!-- Custom Instructions Panel -->
+      <div class="custom-instructions-panel" id="customInstructionsPanel">
+        <!-- Saved Instructions -->
+        <div class="saved-instructions">
+          <h5>📁 הנחיות שמורות:</h5>
+          <div class="saved-list" id="savedInstructionsList">
+            <div class="no-saved-instructions">אין הנחיות שמורות עדיין</div>
+          </div>
+        </div>
+
+        <!-- Upload New Instructions -->
+        <div class="instruction-upload-area" id="instructionUploadArea" onclick="document.getElementById('instructionFileInput').click()">
+          <div class="icon">📄</div>
+          <h5>העלה קובץ הנחיות חדש</h5>
+          <p>PDF, Word, Excel, טקסט או תמונה</p>
+          <input type="file" id="instructionFileInput" accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.xls,.png,.jpg,.jpeg">
+        </div>
+
+        <!-- Uploaded File Preview -->
+        <div class="uploaded-file-preview" id="uploadedFilePreview">
+          <div class="uploaded-file-info">
+            <span class="uploaded-file-name">
+              <span>✅</span>
+              <span id="uploadedFileName">קובץ.pdf</span>
+            </span>
+            <button class="uploaded-file-remove" onclick="removeUploadedInstruction()">✕</button>
+          </div>
+          <input type="text" class="instruction-name-input" id="instructionNameInput" placeholder="שם ההנחיות (לדוגמה: תקנות נגישות)">
+          <button class="save-instruction-btn" id="saveInstructionBtn" onclick="saveInstruction()" disabled>💾 שמור הנחיות</button>
+          <div class="use-without-save">
+            <button onclick="useInstructionWithoutSave()">השתמש פעם אחת בלי לשמור</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Upload Area -->
+    <section class="upload-area" id="uploadArea">
+      <div class="upload-content">
+        <div class="upload-icon">📁</div>
+        <h3>גרור קובץ תוכנית לכאן</h3>
+        <p>או לחץ לבחירת קובץ</p>
+        <div class="upload-formats">
+          <span class="format-tag">DWG</span>
+          <span class="format-tag">DXF</span>
+          <span class="format-tag">DWF</span>
+          <span class="format-tag">ZIP</span>
+        </div>
+      </div>
+      <input type="file" id="fileInput" accept=".dwg,.dxf,.dwf,.zip">
+    </section>
+
+    <!-- Progress -->
+    <section class="progress-section" id="progressSection">
+      <div class="progress-header">
+        <h3>מנתח את התוכנית...</h3>
+        <span class="progress-pct" id="progressPct">0%</span>
+      </div>
+      <div class="progress-bar">
+        <div class="fill" id="progressFill"></div>
+      </div>
+      <div class="progress-steps" id="progressSteps"></div>
+    </section>
+
+    <!-- Error -->
+    <div class="error-box" id="errorBox">
+      <h3>אירעה שגיאה</h3>
+      <p id="errorMsg"></p>
+      <button class="btn" onclick="resetUI()">נסה שוב</button>
+    </div>
+
+    <!-- Results -->
+    <section class="results-section" id="resultsSection">
+      <!-- Method Badge -->
+      <div class="method-badge-wrap" id="methodBadgeWrap" style="display:none">
+        <div class="method-badge" id="methodBadge"></div>
+      </div>
+
+      <!-- Vector Data -->
+      <div class="vector-section" id="vectorSection" style="display:none">
+        <h3>📊 נתונים וקטוריים</h3>
+        <div class="vector-grid" id="vectorGrid"></div>
+        <div class="layers-section" id="layersSection" style="display:none">
+          <h4>שכבות שזוהו:</h4>
+          <div class="layers-tags" id="layersTags"></div>
+        </div>
+      </div>
+
+      <!-- Image -->
+      <div class="image-section" id="imageSection" style="display:none">
+        <div class="image-header">
+          <h3>📐 התוכנית</h3>
+          <div class="source-badges" id="sourceBadges"></div>
+        </div>
+        <div class="image-wrap" id="imageWrap" onclick="toggleZoom(this)">
+          <img id="fullImage" src="" alt="Plan">
+        </div>
+        <a href="" download="plan.png" class="download-btn" id="downloadBtn">📥 הורד תמונה</a>
+      </div>
+
+      <!-- Score -->
+      <div class="score-card" id="scoreCard">
+        <div class="score-circle">
+          <svg width="180" height="180" viewBox="0 0 180 180">
+            <circle class="score-circle-bg" cx="90" cy="90" r="80"/>
+            <circle class="score-circle-fill" id="scoreCircle" cx="90" cy="90" r="80"
+              stroke-dasharray="502" stroke-dashoffset="502"/>
+          </svg>
+          <div class="score-value">
+            <div class="score-number" id="scoreNumber">--</div>
+            <div class="score-max">/100</div>
+          </div>
+        </div>
+        <div class="score-status" id="scoreStatus">--</div>
+        <div class="building-type" id="buildingType"></div>
+      </div>
+
+      <!-- Critical Issues -->
+      <div class="critical-box" id="criticalBox" style="display:none">
+        <h3>בעיות קריטיות</h3>
+        <ul id="criticalList"></ul>
+      </div>
+
+      <!-- Categories -->
+      <div class="categories-grid" id="categoriesGrid"></div>
+
+      <!-- Summary -->
+      <div class="summary-box" id="summaryBox">
+        <h3>📋 סיכום</h3>
+        <p id="summaryText"></p>
+      </div>
+
+      <!-- Meta -->
+      <div class="meta-bar" id="metaBar"></div>
+
+      <!-- Reset Button -->
+      <div style="text-align:center">
+        <button class="btn" onclick="resetUI()">🔄 בדוק תוכנית נוספת</button>
+      </div>
+    </section>
+  </div>
+
+  <footer class="footer">
+    <p>FireCheck Pro © 2026 - מערכת בדיקת בטיחות אש מתקדמת</p>
+  </footer>
+
+  <!-- Lightbox -->
+  <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+    <img id="lightboxImg" src="">
+  </div>
+
+  <script>
+    // Railway backend URL - update this after deploying to Railway
+    const API_BASE = window.RAILWAY_URL || 'https://fire-checker-production.up.railway.app/api';
+    const uploadArea = document.getElementById('uploadArea');
+    const fileInput = document.getElementById('fileInput');
+    const progressSection = document.getElementById('progressSection');
+    const resultsSection = document.getElementById('resultsSection');
+    const errorBox = document.getElementById('errorBox');
+
+    let currentInstructionId = 'fire-safety';
+    let currentInstructionType = 'fire-safety';
+    let uploadedInstructionFile = null;
+    let tempInstructionContent = null;
+
+    // Instruction type selection
+    function selectInstructionType(type) {
+      document.querySelectorAll('.instruction-tab').forEach(t => t.classList.toggle('active', t.dataset.type === type));
+      currentInstructionType = type;
+
+      const customPanel = document.getElementById('customInstructionsPanel');
+      if (type === 'custom') {
+        customPanel.classList.add('active');
+        loadSavedInstructions();
+        currentInstructionId = null; // Will be set when instruction is selected/uploaded
+      } else {
+        customPanel.classList.remove('active');
+        currentInstructionId = 'fire-safety';
+      }
+    }
+
+    // Load saved instructions from localStorage
+    function loadSavedInstructions() {
+      const saved = JSON.parse(localStorage.getItem('savedInstructions') || '[]');
+      const list = document.getElementById('savedInstructionsList');
+
+      if (saved.length === 0) {
+        list.innerHTML = '<div class="no-saved-instructions">אין הנחיות שמורות עדיין</div>';
+        return;
+      }
+
+      list.innerHTML = saved.map((inst, idx) => `
+        <div class="saved-item ${currentInstructionId === 'saved-' + idx ? 'selected' : ''}" onclick="selectSavedInstruction(${idx})">
+          <div class="saved-item-info">
+            <span>📋</span>
+            <div>
+              <div class="saved-item-name">${inst.name}</div>
+              <div class="saved-item-date">${inst.originalFileName} • ${new Date(inst.createdAt).toLocaleDateString('he-IL')}</div>
+            </div>
+          </div>
+          <button class="saved-item-delete" onclick="event.stopPropagation(); deleteInstruction(${idx})">🗑️</button>
+        </div>
+      `).join('');
+    }
+
+    // Select a saved instruction
+    function selectSavedInstruction(idx) {
+      const saved = JSON.parse(localStorage.getItem('savedInstructions') || '[]');
+      if (saved[idx]) {
+        currentInstructionId = 'saved-' + idx;
+        tempInstructionContent = saved[idx].content;
+        document.querySelectorAll('.saved-item').forEach((el, i) => el.classList.toggle('selected', i === idx));
+        // Hide upload preview if visible
+        document.getElementById('uploadedFilePreview').classList.remove('active');
+        document.getElementById('instructionUploadArea').style.display = '';
+      }
+    }
+
+    // Delete a saved instruction
+    function deleteInstruction(idx) {
+      if (!confirm('למחוק את ההנחיות?')) return;
+      const saved = JSON.parse(localStorage.getItem('savedInstructions') || '[]');
+      saved.splice(idx, 1);
+      localStorage.setItem('savedInstructions', JSON.stringify(saved));
+      loadSavedInstructions();
+      if (currentInstructionId === 'saved-' + idx) {
+        currentInstructionId = null;
+        tempInstructionContent = null;
+      }
+    }
+
+    // Instruction file upload handler
+    document.getElementById('instructionFileInput').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const ext = file.name.split('.').pop().toLowerCase();
+      const allowedExts = ['pdf', 'doc', 'docx', 'txt', 'md', 'xlsx', 'xls', 'png', 'jpg', 'jpeg'];
+      if (!allowedExts.includes(ext)) {
+        alert('סוג קובץ לא נתמך. אנא העלה PDF, Word, Excel, טקסט או תמונה.');
+        return;
+      }
+
+      uploadedInstructionFile = file;
+      document.getElementById('uploadedFileName').textContent = file.name;
+      document.getElementById('uploadedFilePreview').classList.add('active');
+      document.getElementById('instructionUploadArea').style.display = 'none';
+
+      // Clear any saved selection
+      document.querySelectorAll('.saved-item').forEach(el => el.classList.remove('selected'));
+      currentInstructionId = null;
+
+      // Enable save button when name is entered
+      document.getElementById('instructionNameInput').value = '';
+      document.getElementById('saveInstructionBtn').disabled = true;
+    });
+
+    // Enable save button when name is entered
+    document.getElementById('instructionNameInput').addEventListener('input', (e) => {
+      document.getElementById('saveInstructionBtn').disabled = !e.target.value.trim();
+    });
+
+    // Remove uploaded instruction file
+    function removeUploadedInstruction() {
+      uploadedInstructionFile = null;
+      tempInstructionContent = null;
+      document.getElementById('uploadedFilePreview').classList.remove('active');
+      document.getElementById('instructionUploadArea').style.display = '';
+      document.getElementById('instructionFileInput').value = '';
+    }
+
+    // Save instruction to localStorage
+    async function saveInstruction() {
+      const name = document.getElementById('instructionNameInput').value.trim();
+      if (!name || !uploadedInstructionFile) return;
+
+      const btn = document.getElementById('saveInstructionBtn');
+      btn.disabled = true;
+      btn.textContent = '⏳ מעבד...';
+
+      try {
+        // Send to server to parse the file
+        const formData = new FormData();
+        formData.append('instructionFile', uploadedInstructionFile);
+
+        const resp = await fetch(API_BASE + '/parse-instruction', { method: 'POST', body: formData });
+        if (!resp.ok) throw new Error('שגיאה בעיבוד הקובץ');
+
+        const data = await resp.json();
+
+        // Save to localStorage
+        const saved = JSON.parse(localStorage.getItem('savedInstructions') || '[]');
+        saved.push({
+          name: name,
+          originalFileName: uploadedInstructionFile.name,
+          content: data.content,
+          createdAt: new Date().toISOString()
+        });
+        localStorage.setItem('savedInstructions', JSON.stringify(saved));
+
+        // Select the newly saved instruction
+        currentInstructionId = 'saved-' + (saved.length - 1);
+        tempInstructionContent = data.content;
+
+        // Reset UI
+        removeUploadedInstruction();
+        loadSavedInstructions();
+        alert('✅ ההנחיות נשמרו בהצלחה!');
+
+      } catch (err) {
+        alert('שגיאה: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '💾 שמור הנחיות';
+      }
+    }
+
+    // Use instruction without saving
+    async function useInstructionWithoutSave() {
+      if (!uploadedInstructionFile) return;
+
+      const btn = document.querySelector('.use-without-save button');
+      btn.textContent = '⏳ מעבד...';
+
+      try {
+        const formData = new FormData();
+        formData.append('instructionFile', uploadedInstructionFile);
+
+        const resp = await fetch(API_BASE + '/parse-instruction', { method: 'POST', body: formData });
+        if (!resp.ok) throw new Error('שגיאה בעיבוד הקובץ');
+
+        const data = await resp.json();
+        tempInstructionContent = data.content;
+        currentInstructionId = 'temp';
+
+        alert('✅ ההנחיות מוכנות לשימוש! העלה קובץ תוכנית לניתוח.');
+
+      } catch (err) {
+        alert('שגיאה: ' + err.message);
+      } finally {
+        btn.textContent = 'השתמש פעם אחת בלי לשמור';
+      }
+    }
+
+    // Upload handlers
+    uploadArea.addEventListener('click', () => fileInput.click());
+    uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+    uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+    uploadArea.addEventListener('drop', e => {
+      e.preventDefault();
+      uploadArea.classList.remove('dragover');
+      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length) handleFile(fileInput.files[0]);
+    });
+
+    async function handleFile(file) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (!['dwg', 'dxf', 'dwf', 'zip'].includes(ext)) {
+        alert('נא להעלות קובץ DWG, DXF, DWF או ZIP בלבד');
+        return;
+      }
+
+      uploadArea.style.display = 'none';
+      document.getElementById('instructionSection').style.display = 'none';
+      progressSection.classList.add('active');
+      errorBox.classList.remove('active');
+      resultsSection.classList.remove('active');
+
+      const steps = [
+        { msg: '📤 מעלה קובץ...', pct: 5 },
+        { msg: '🔄 מעבד תוכנית...', pct: 20 },
+        { msg: '🔍 מזהה אלמנטים...', pct: 45 },
+        { msg: '🧠 מנתח בטיחות...', pct: 70 },
+        { msg: '📊 מכין דוח...', pct: 90 }
+      ];
+
+      let stepIdx = 0;
+      const interval = setInterval(() => {
+        if (stepIdx < steps.length) {
+          updateProgress(steps[stepIdx].msg, steps[stepIdx].pct);
+          stepIdx++;
+        }
+      }, 5000);
+
+      updateProgress('📤 מתחיל...', 2);
+
+      // Validate custom instructions are set
+      if (currentInstructionType === 'custom' && !currentInstructionId && !tempInstructionContent) {
+        alert('אנא בחר הנחיות שמורות או העלה קובץ הנחיות חדש');
+        resetUI();
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('dwgFile', file);
+      formData.append('instructionId', currentInstructionId || 'fire-safety');
+      if (tempInstructionContent) {
+        formData.append('customInstructions', tempInstructionContent);
+      }
+
+      try {
+        const resp = await fetch(API_BASE + '/analyze', { method: 'POST', body: formData });
+        clearInterval(interval);
+
+        if (!resp.ok) {
+          const err = await resp.json();
+          throw new Error(err.error || 'שגיאת שרת');
+        }
+
+        const data = await resp.json();
+        updateProgress('✅ הושלם!', 100);
+
+        setTimeout(() => {
+          progressSection.classList.remove('active');
+          displayResults(data);
+        }, 800);
+
+      } catch (err) {
+        clearInterval(interval);
+        progressSection.classList.remove('active');
+        errorBox.classList.add('active');
+        document.getElementById('errorMsg').textContent = err.message;
+      }
+    }
+
+    function updateProgress(msg, pct) {
+      document.getElementById('progressPct').textContent = pct + '%';
+      document.getElementById('progressFill').style.width = pct + '%';
+
+      const stepsDiv = document.getElementById('progressSteps');
+      stepsDiv.querySelectorAll('.progress-step.active').forEach(el => {
+        el.classList.remove('active');
+        el.classList.add('done');
+        el.querySelector('.step-icon').innerHTML = '✅';
+      });
+
+      const step = document.createElement('div');
+      step.className = 'progress-step active';
+      step.innerHTML = '<span class="step-icon"><span class="spinner"></span></span> ' + msg;
+      stepsDiv.appendChild(step);
+    }
+
+    function displayResults(data) {
+      resultsSection.classList.add('active');
+      const a = data.analysis;
+
+      // Method badge
+      const badgeWrap = document.getElementById('methodBadgeWrap');
+      const badge = document.getElementById('methodBadge');
+      badgeWrap.style.display = 'flex';
+      if (data.analysisMethod === 'vector') {
+        badge.className = 'method-badge vector';
+        badge.innerHTML = '🔷 ניתוח וקטורי (DXF)';
+      } else {
+        badge.className = 'method-badge vision';
+        badge.innerHTML = '🧠 ניתוח AI (Claude Vision)';
+      }
+
+      // Vector data
+      const vectorSection = document.getElementById('vectorSection');
+      if (data.vectorData && data.analysisMethod === 'vector') {
+        vectorSection.style.display = 'block';
+        const summary = data.vectorData.summary || {};
+        const items = [
+          { k: 'walls', l: 'קירות', i: '🧱' },
+          { k: 'doors', l: 'דלתות', i: '🚪' },
+          { k: 'fireDoors', l: 'דלתות אש', i: '🔥', h: true },
+          { k: 'stairs', l: 'מדרגות', i: '🪜' },
+          { k: 'sprinklers', l: 'מתזים', i: '💧', h: true },
+          { k: 'smokeDetectors', l: 'גלאי עשן', i: '🔔' },
+          { k: 'fireExtinguishers', l: 'מטפים', i: '🧯', h: true },
+          { k: 'hydrants', l: 'ברזים', i: '🔴' },
+          { k: 'emergencyLights', l: 'תאורת חירום', i: '💡' },
+          { k: 'exitSigns', l: 'שלטי יציאה', i: '🟢' }
+        ];
+
+        document.getElementById('vectorGrid').innerHTML = items.map(item => {
+          const count = summary[item.k] || 0;
+          let cls = '';
+          if (item.h && count > 0) cls = 'highlight';
+          else if (item.h && count === 0) cls = 'warning';
+          return '<div class="vector-item ' + cls + '"><div class="count">' + count + '</div><div class="label">' + item.i + ' ' + item.l + '</div></div>';
+        }).join('');
+
+        const layersSection = document.getElementById('layersSection');
+        if (data.vectorData.layers && data.vectorData.layers.length > 0) {
+          layersSection.style.display = 'block';
+          document.getElementById('layersTags').innerHTML = data.vectorData.layers.slice(0, 15).map(l => '<span class="layer-tag">' + (l || 'ללא שם') + '</span>').join('');
+        }
+      } else {
+        vectorSection.style.display = 'none';
+      }
+
+      // Image
+      const imageSection = document.getElementById('imageSection');
+      if (data.imageUrl) {
+        imageSection.style.display = 'block';
+        document.getElementById('fullImage').src = data.imageUrl;
+        document.getElementById('downloadBtn').href = data.imageUrl;
+
+        const badges = document.getElementById('sourceBadges');
+        const srcClass = data.sourceType === 'vector-dxf' ? 'vector' : (data.sourceType === 'derivative' ? 'derivative' : 'thumbnail');
+        const srcLabel = data.sourceType === 'vector-dxf' ? 'רנדור וקטורי' : (data.sourceType === 'derivative' ? 'מקור' : 'תמונה');
+        badges.innerHTML = '<span class="source-badge ' + srcClass + '">' + srcLabel + '</span>';
+        if (data.outputDimensions) badges.innerHTML += '<span class="source-badge thumbnail">' + data.outputDimensions + '</span>';
+      } else {
+        imageSection.style.display = 'none';
+      }
+
+      // Score
+      const score = a.overallScore || 0;
+      const status = (a.overallStatus || '').toLowerCase();
+      const scoreCard = document.getElementById('scoreCard');
+
+      let statusClass = 'review';
+      let statusLabel = '⚠️ לבדיקה';
+      if (status.includes('עובר') || status.includes('pass')) { statusClass = 'pass'; statusLabel = '✅ עובר'; }
+      else if (status.includes('נכשל') || status.includes('fail')) { statusClass = 'fail'; statusLabel = '❌ נכשל'; }
+
+      scoreCard.className = 'score-card ' + statusClass;
+      document.getElementById('scoreNumber').textContent = score;
+      document.getElementById('scoreStatus').textContent = statusLabel;
+      document.getElementById('buildingType').textContent = a.buildingType || '';
+
+      // Animate score circle
+      const offset = 502 - (score / 100) * 502;
+      document.getElementById('scoreCircle').style.strokeDashoffset = offset;
+
+      // Critical issues
+      const criticals = a.criticalIssues || [];
+      const criticalBox = document.getElementById('criticalBox');
+      if (criticals.length > 0) {
+        criticalBox.style.display = 'block';
+        document.getElementById('criticalList').innerHTML = criticals.map(c => '<li>' + c + '</li>').join('');
+      } else {
+        criticalBox.style.display = 'none';
+      }
+
+      // Categories
+      const grid = document.getElementById('categoriesGrid');
+      grid.innerHTML = '';
+      const cats = a.categories || [];
+      cats.forEach(cat => {
+        let catClass = 'review';
+        let catLabel = '⚠️ לבדיקה';
+        const s = (cat.status || '').toLowerCase();
+        if (s.includes('עובר') || s.includes('pass')) { catClass = 'pass'; catLabel = '✅ ' + (cat.score || ''); }
+        else if (s.includes('נכשל') || s.includes('fail')) { catClass = 'fail'; catLabel = '❌ ' + (cat.score || ''); }
+        else catLabel = '⚠️ ' + (cat.score || '');
+
+        const findings = (cat.findings || []).map(f => '<li>' + f + '</li>').join('');
+        const recs = (cat.recommendations || []).map(r => '<li class="rec">' + r + '</li>').join('');
+
+        grid.innerHTML += '<div class="category-card ' + catClass + '"><div class="cat-header"><span class="cat-name">' + (cat.nameHe || cat.name) + '</span><span class="cat-badge ' + catClass + '">' + catLabel + '</span></div><ul class="cat-findings">' + findings + recs + '</ul></div>';
+      });
+
+      // Summary
+      document.getElementById('summaryText').textContent = a.summaryHe || a.summary || '';
+
+      // Meta
+      document.getElementById('metaBar').innerHTML = '<span>📁 ' + data.filename + '</span><span>⏱️ ' + data.processingTime + '</span>';
+    }
+
+    function toggleZoom(el) { el.classList.toggle('zoomed'); }
+    function openLightbox(src) {
+      document.getElementById('lightboxImg').src = src;
+      document.getElementById('lightbox').classList.add('active');
+    }
+    function closeLightbox() { document.getElementById('lightbox').classList.remove('active'); }
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+    function resetUI() {
+      uploadArea.style.display = '';
+      document.getElementById('instructionSection').style.display = '';
+      progressSection.classList.remove('active');
+      resultsSection.classList.remove('active');
+      errorBox.classList.remove('active');
+      document.getElementById('progressSteps').innerHTML = '';
+      document.getElementById('categoriesGrid').innerHTML = '';
+      document.getElementById('criticalBox').style.display = 'none';
+      document.getElementById('imageSection').style.display = 'none';
+      document.getElementById('vectorSection').style.display = 'none';
+      document.getElementById('methodBadgeWrap').style.display = 'none';
+      document.getElementById('scoreCircle').style.strokeDashoffset = 502;
+      fileInput.value = '';
+    }
+  </script>
+</body>
+</html>
