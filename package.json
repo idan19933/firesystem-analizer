@@ -4,7 +4,7 @@
   "description": "Fire Safety Plan Checker - Railway Deployment",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node --max-old-space-size=6144 server.js",
     "dev": "node server.js"
   },
   "engines": {
