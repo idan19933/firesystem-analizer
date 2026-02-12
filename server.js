@@ -1,5 +1,5 @@
 /**
- * Fire Safety Checker - Railway Server v13
+ * Fire Safety Checker - Railway Server v14
  * Standalone Express server for Railway deployment
  */
 
@@ -451,7 +451,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '13.0.0-railway'
+    version: '14.0.0-railway'
   });
 });
 
@@ -523,18 +523,91 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     const ext = path.extname(originalName).toLowerCase();
     const isDXF = ext === '.dxf';
 
-    // ===== DXF FILES: Use vector-based analysis =====
+    // ===== DXF FILES: Use vector rendering + Claude Vision =====
     if (isDXF) {
-      console.log('DXF file detected - using vector analysis');
+      console.log('DXF file detected - using vector render + Claude Vision');
+      const sharp = require('sharp');
+
+      // Get analysis prompt (same as DWG path)
+      let analysisPrompt;
+      if (req.body.customInstructions) {
+        console.log('Using custom instructions from client');
+        analysisPrompt = buildCustomPrompt(req.body.customInstructions, 'הנחיות מותאמות');
+      } else {
+        const instructionId = req.body.instructionId || 'fire-safety';
+        analysisPrompt = getInstructionPrompt(instructionId);
+      }
+
+      // Step 1: Render DXF to high-res PNG (only for image, not scoring)
       const result = await analyzeDXF(filePath);
 
-      // Save image locally
-      let imageUrl = null;
-      if (result.pngBuffer) {
-        const imageId = uuidv4();
-        const imagePath = path.join(imagesDir, `${imageId}.png`);
-        fs.writeFileSync(imagePath, result.pngBuffer);
-        imageUrl = `/images/${imageId}.png`;
+      if (!result.pngBuffer) {
+        throw new Error('Failed to render DXF to image');
+      }
+
+      // Save main image
+      const imageId = uuidv4();
+      const mainImagePath = path.join(imagesDir, `${imageId}.png`);
+      fs.writeFileSync(mainImagePath, result.pngBuffer);
+      const imageUrl = `/images/${imageId}.png`;
+
+      // Step 2: Split PNG into zones for detailed analysis (same as DWG)
+      const imgMeta = await sharp(result.pngBuffer).metadata();
+      const w = imgMeta.width || 4000;
+      const h = imgMeta.height || 4000;
+
+      console.log(`DXF rendered image: ${w}x${h}`);
+
+      // Create zones - 3x3 grid like DWG path
+      const zones = [];
+      const zoneUrls = [];
+      const zoneW = Math.floor(w / 3);
+      const zoneH = Math.floor(h / 3);
+
+      const zoneLabels = [
+        ['עליון שמאלי', 'עליון אמצעי', 'עליון ימני'],
+        ['אמצעי שמאלי', 'מרכז', 'אמצעי ימני'],
+        ['תחתון שמאלי', 'תחתון אמצעי', 'תחתון ימני']
+      ];
+
+      for (let row = 0; row < 3; row++) {
+        for (let col = 0; col < 3; col++) {
+          try {
+            const zoneBuffer = await sharp(result.pngBuffer)
+              .extract({
+                left: col * zoneW,
+                top: row * zoneH,
+                width: Math.min(zoneW, w - col * zoneW),
+                height: Math.min(zoneH, h - row * zoneH)
+              })
+              .sharpen({ sigma: 1.0 })
+              .png()
+              .toBuffer();
+
+            const zonePath = path.join(imagesDir, `${imageId}_zone${zones.length}.png`);
+            fs.writeFileSync(zonePath, zoneBuffer);
+
+            zones.push({ buffer: zoneBuffer, label: zoneLabels[row][col] });
+            zoneUrls.push({ url: `/images/${imageId}_zone${zones.length - 1}.png`, label: zoneLabels[row][col] });
+          } catch (e) {
+            console.log(`Failed to extract DXF zone ${row},${col}:`, e.message);
+          }
+        }
+      }
+
+      console.log(`Created ${zones.length} zones for Claude analysis`);
+
+      // Step 3: Send all images to Claude Vision (same as DWG path)
+      const imageBuffers = { fullImage: result.pngBuffer, zones };
+      const rawAnalysis = await analyzeWithAI(imageBuffers, analysisPrompt);
+
+      // Parse Claude's response
+      let analysis;
+      try {
+        const jsonMatch = rawAnalysis.match(/```json\n?([\s\S]*?)\n?```/) || rawAnalysis.match(/\{[\s\S]*"categories"[\s\S]*\}/);
+        analysis = JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : rawAnalysis);
+      } catch (e) {
+        analysis = { rawText: rawAnalysis, parseError: true };
       }
 
       // Cleanup
@@ -544,13 +617,14 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       return res.json({
         success: true,
         filename: originalName,
-        analysis: result.analysis,
-        analysisMethod: 'vector',
-        vectorData: result.vectorData,
+        analysis,
+        analysisMethod: 'vision',
+        vectorData: result.vectorData, // Keep vector stats as supplementary data
         imageUrl,
-        sourceType: 'vector-dxf',
+        zoneUrls,
+        sourceType: 'vector-dxf-vision',
         sourceDimensions: `${result.parsed.entityCount} entities`,
-        outputDimensions: '4000x auto',
+        outputDimensions: `${w}x${h}`,
         processingTime: `${((Date.now() - startTime) / 1000).toFixed(1)}s`
       });
     }
@@ -634,5 +708,5 @@ app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 13.0.0-railway`);
+  console.log(`   Version: 14.0.0-railway`);
 });

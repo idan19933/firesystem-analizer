@@ -1,4 +1,4 @@
-// dxf-analyzer.js v7 - Geometry-based classification for flattened DXF files
+// dxf-analyzer.js v8 - Rendering only, Claude Vision does the analysis
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -733,182 +733,9 @@ function classifyEntities(parsed) {
   return C;
 }
 
-// ============ GEOMETRY ============
-function analyzeGeometry(classified) {
-  const G = {
-    bounds: { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
-    totalArea: 0,
-    maxTravelDistances: [],
-    sprinklerSpacing: [],
-    detectorSpacing: [],
-    extinguisherSpacing: [],
-    hydrantSpacing: []
-  };
-
-  const all = [].concat(classified.walls, classified.doors, classified.corridors);
-  for (let i = 0; i < all.length; i++) {
-    const ent = all[i];
-    if (ent.x !== undefined) {
-      G.bounds.minX = Math.min(G.bounds.minX, ent.x);
-      G.bounds.maxX = Math.max(G.bounds.maxX, ent.x);
-      G.bounds.minY = Math.min(G.bounds.minY, ent.y);
-      G.bounds.maxY = Math.max(G.bounds.maxY, ent.y);
-    }
-    if (ent.x2 !== undefined) {
-      G.bounds.minX = Math.min(G.bounds.minX, ent.x2);
-      G.bounds.maxX = Math.max(G.bounds.maxX, ent.x2);
-      G.bounds.minY = Math.min(G.bounds.minY, ent.y2);
-      G.bounds.maxY = Math.max(G.bounds.maxY, ent.y2);
-    }
-  }
-
-  if (G.bounds.minX !== Infinity) {
-    G.totalArea = (G.bounds.maxX - G.bounds.minX) * (G.bounds.maxY - G.bounds.minY);
-  }
-
-  function computeSpacing(items) {
-    const p = items.filter(e => e.x !== undefined).map(e => ({ x: e.x, y: e.y }));
-    if (p.length < 2) return [];
-    const sample = p.length > 500 ? p.filter((_, i) => i % Math.ceil(p.length / 500) === 0) : p;
-    return sample.map((pt, i) => {
-      let min = Infinity;
-      for (let j = 0; j < sample.length; j++) {
-        if (i !== j) {
-          const d = Math.hypot(pt.x - sample[j].x, pt.y - sample[j].y);
-          if (d < min) min = d;
-        }
-      }
-      return min;
-    }).filter(d => d < Infinity);
-  }
-
-  G.sprinklerSpacing = computeSpacing(classified.sprinklers);
-  G.detectorSpacing = computeSpacing(classified.smokeDetectors);
-  G.extinguisherSpacing = computeSpacing(classified.fireExtinguishers);
-  G.hydrantSpacing = computeSpacing(classified.hydrants);
-
-  const exits = [].concat(classified.exits, classified.stairs).filter(e => e.x !== undefined);
-  if (exits.length > 0 && G.bounds.minX !== Infinity) {
-    const sx = (G.bounds.maxX - G.bounds.minX) / 10 || 1;
-    const sy = (G.bounds.maxY - G.bounds.minY) / 10 || 1;
-    for (let x = G.bounds.minX; x <= G.bounds.maxX; x += sx) {
-      for (let y = G.bounds.minY; y <= G.bounds.maxY; y += sy) {
-        let min = Infinity;
-        exits.forEach(e => {
-          const d = Math.hypot(x - e.x, y - e.y);
-          if (d < min) min = d;
-        });
-        G.maxTravelDistances.push(min);
-      }
-    }
-  }
-
-  return G;
-}
-
-// ============ RULES ============
-function checkFireSafetyRules(classified, geometry) {
-  const R = {
-    overallScore: 0,
-    overallStatus: 'דורש_בדיקה',
-    buildingType: 'מבנה',
-    categories: [],
-    criticalIssues: [],
-    summary: '',
-    summaryHe: ''
-  };
-
-  const allText = classified.texts.slice(0, 1000).map(t => t.text || '').join(' ');
-  if (/office|משרד/i.test(allText)) R.buildingType = 'מבנה משרדים';
-  else if (/resid|מגור/i.test(allText)) R.buildingType = 'מבנה מגורים';
-
-  const scores = [];
-  const avg = (a) => a.length ? a.reduce((s, v) => s + v, 0) / a.length : null;
-
-  const ac = classified.accessRoads.length;
-  let s1 = ac > 0 ? 70 : 20;
-  R.categories.push({ id: 1, nameHe: 'דרכי גישה', status: ac > 0 ? 'דורש_בדיקה' : 'נכשל', score: s1, findings: [ac + ' אלמנטי גישה'], recommendations: ac === 0 ? ['לסמן דרך גישה 3.5מ'] : [] });
-  scores.push(s1);
-
-  const exitC = classified.exits.length + classified.stairs.length;
-  const maxT = geometry.maxTravelDistances.length ? Math.max(...geometry.maxTravelDistances) : null;
-  let s2 = 50;
-  const f2 = ['יציאות: ' + classified.exits.length, 'מדרגות: ' + classified.stairs.length, 'דלתות: ' + classified.doors.length + ' (אש: ' + classified.fireDoors.length + ')'];
-  const r2 = [];
-  if (exitC >= 2) { s2 += 30; f2.push('2+ יציאות'); }
-  else { r2.push('נדרשות 2 יציאות'); R.criticalIssues.push('פחות מ-2 יציאות'); }
-  if (maxT !== null) { f2.push('מרחק מילוט: ' + maxT.toFixed(1) + 'מ'); if (maxT > 40) { s2 -= 20; r2.push('מרחק>40מ'); } }
-  if (classified.fireDoors.length > 0) s2 += 10; else r2.push('לסמן דלתות אש');
-  R.categories.push({ id: 2, nameHe: 'דרכי מילוט ויציאות', status: s2 >= 70 ? 'עובר' : s2 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, Math.max(0, s2)), findings: f2, recommendations: r2 });
-  scores.push(s2);
-
-  let s3 = 20;
-  if (classified.smokeDetectors.length > 0) s3 += 25;
-  if (classified.heatDetectors.length > 0) s3 += 10;
-  if (classified.manualCallPoints.length > 0) s3 += 15;
-  if (classified.fireAlarmPanel.length > 0) s3 += 15;
-  const ad = avg(geometry.detectorSpacing);
-  const f3 = ['גלאי עשן: ' + classified.smokeDetectors.length, 'גלאי חום: ' + classified.heatDetectors.length];
-  if (ad) f3.push('מרחק גלאים: ' + ad.toFixed(1) + 'מ');
-  R.categories.push({ id: 3, nameHe: 'מערכת גילוי', status: s3 >= 70 ? 'עובר' : s3 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s3), findings: f3, recommendations: classified.smokeDetectors.length === 0 ? ['להוסיף גלאי עשן'] : [] });
-  scores.push(s3);
-
-  let s4 = classified.sprinklers.length > 0 ? 50 : 10;
-  const aspr = avg(geometry.sprinklerSpacing);
-  if (aspr && aspr <= 4.5) s4 += 30;
-  if (classified.sprinklers.length > 5) s4 += 10;
-  const f4 = ['מתזים: ' + classified.sprinklers.length];
-  if (aspr) f4.push('מרחק: ' + aspr.toFixed(1) + 'מ');
-  R.categories.push({ id: 4, nameHe: 'מערכת מתזים', status: s4 >= 70 ? 'עובר' : s4 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s4), findings: f4, recommendations: classified.sprinklers.length === 0 ? ['לבדוק חובת מתזים'] : [] });
-  scores.push(s4);
-
-  let s5 = 20;
-  if (classified.fireExtinguishers.length > 0) s5 += 25;
-  if (classified.hydrants.length > 0) s5 += 25;
-  const afe = avg(geometry.extinguisherSpacing);
-  const aih = avg(geometry.hydrantSpacing);
-  if (afe && afe <= 25) s5 += 15;
-  if (aih && aih <= 30) s5 += 15;
-  const f5 = ['מטפים: ' + classified.fireExtinguishers.length, 'ברזי כיבוי: ' + classified.hydrants.length];
-  const r5 = [];
-  if (classified.fireExtinguishers.length === 0) r5.push('להוסיף מטפים');
-  if (classified.hydrants.length === 0) r5.push('להוסיף ברזים');
-  R.categories.push({ id: 5, nameHe: 'ציוד כיבוי', status: s5 >= 70 ? 'עובר' : s5 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s5), findings: f5, recommendations: r5 });
-  scores.push(s5);
-
-  let s6 = 30;
-  if (classified.fireWalls.length > 0) s6 += 30;
-  if (classified.fireDoors.length > 0) s6 += 20;
-  R.categories.push({ id: 6, nameHe: 'הפרדות אש', status: s6 >= 70 ? 'עובר' : s6 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: s6, findings: ['קירות אש: ' + classified.fireWalls.length, 'דלתות אש: ' + classified.fireDoors.length], recommendations: classified.fireWalls.length === 0 ? ['לסמן קירות אש'] : [] });
-  scores.push(s6);
-
-  let s7 = 20;
-  if (classified.emergencyLights.length > 0) s7 += 30;
-  if (classified.exitSigns.length > 0) s7 += 30;
-  R.categories.push({ id: 7, nameHe: 'תאורת חירום ושילוט', status: s7 >= 70 ? 'עובר' : s7 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: s7, findings: ['תאורת חירום: ' + classified.emergencyLights.length, 'שלטי יציאה: ' + classified.exitSigns.length], recommendations: [] });
-  scores.push(s7);
-
-  const sv = classified.smokeVents.length;
-  let s8 = sv > 0 ? 60 : 15;
-  R.categories.push({ id: 8, nameHe: 'שליטה בעשן', status: s8 >= 60 ? 'דורש_בדיקה' : 'נכשל', score: s8, findings: ['פתחי עשן: ' + sv], recommendations: sv === 0 ? ['מערכת שחרור עשן'] : [] });
-  scores.push(s8);
-
-  let s9 = 20;
-  const textSample = classified.texts.slice(0, 500);
-  if (textSample.some(t => /plan|תוכנית/i.test(t.text || ''))) s9 += 20;
-  if (textSample.some(t => /scale|קנה|1:/i.test(t.text || ''))) s9 += 20;
-  R.categories.push({ id: 9, nameHe: 'תיעוד', status: s9 >= 70 ? 'עובר' : s9 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s9), findings: ['טקסטים: ' + classified.texts.length, 'שכבות: ' + Object.keys(classified.stats.byLayer).length], recommendations: [] });
-  scores.push(s9);
-
-  R.overallScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
-  R.overallStatus = R.overallScore >= 70 ? 'עובר' : R.overallScore >= 40 ? 'דורש_בדיקה' : 'נכשל';
-  R.summary = 'ניתוח: ' + classified.stats.total + ' אלמנטים (' + classified.stats.classified + ' מסווגים). ציון: ' + R.overallScore + '/100.';
-  R.summaryHe = R.summary;
-
-  return R;
-}
-
 // ============ SMART BOUNDS ============
+// Note: analyzeGeometry and checkFireSafetyRules removed in v8
+// Scoring is now done by Claude Vision in server.js
 function computeSmartBounds(entities) {
   const maxSample = 50000;
   let sample = entities;
@@ -1139,22 +966,24 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
 }
 
 // ============ MAIN ============
+// v8: Rendering only - scoring is done by Claude Vision in server.js
 async function analyzeDXF(filePath) {
-  console.log('Vector DXF analysis v7 (geometry-based for flattened files)...');
+  console.log('Vector DXF rendering v8 (Claude Vision will analyze)...');
   console.log('  Memory limits: ' + MAX_ENTITIES_AFTER_EXPANSION + ' entities max, ' + MAX_ENTITIES_FOR_SVG + ' for SVG');
 
   let parsed = await parseDXFStreaming(filePath);
   console.log('  Entities: ' + parsed.entities.length + ', Blocks: ' + parsed.blockCount + ', Layers: ' + Object.keys(parsed.layers).length);
 
+  // Classify for rendering purposes only (coloring different element types)
   let classified = classifyEntities(parsed);
 
-  const geometry = analyzeGeometry(classified);
-  const analysis = checkFireSafetyRules(classified, geometry);
-
+  // Store metadata before rendering
   const entityCount = parsed.entities.length;
   const blockCount = parsed.blockCount;
   const layerCount = Object.keys(parsed.layers).length;
   const layersCopy = { ...parsed.layers };
+
+  // Collect vector statistics (supplementary data for Claude)
   const vectorData = {
     layers: Object.keys(classified.stats.byLayer),
     entityTypes: { ...classified.stats.byType },
@@ -1176,12 +1005,14 @@ async function analyzeDXF(filePath) {
     }
   };
 
+  // Render to SVG then PNG (this is the main output for Claude Vision)
   const tmpDir = os.tmpdir();
   const svgPath = path.join(tmpDir, 'dxf_render_' + Date.now() + '.svg');
 
   await renderToSVGFile(parsed.entities, classified, 4000, svgPath);
   console.log('  SVG written to: ' + svgPath);
 
+  // Aggressive memory cleanup
   parsed.entities = null;
   parsed.blocks = null;
   parsed = null;
@@ -1216,6 +1047,7 @@ async function analyzeDXF(filePath) {
     console.log('  Manual GC triggered');
   }
 
+  // Convert SVG to PNG for Claude Vision
   let pngBuffer = null;
   let svg = null;
 
@@ -1238,8 +1070,8 @@ async function analyzeDXF(filePath) {
     fs.unlinkSync(svgPath);
   } catch (e) {}
 
+  // Return rendered image and metadata (NO hardcoded analysis - Claude does that)
   return {
-    analysis: analysis,
     svg: svg,
     pngBuffer: pngBuffer,
     parsed: {
@@ -1256,7 +1088,7 @@ module.exports = {
   analyzeDXF,
   parseDXFStreaming,
   classifyEntities,
-  analyzeGeometry,
-  checkFireSafetyRules,
   renderToSVGFile
+  // Note: analyzeGeometry and checkFireSafetyRules removed -
+  // scoring is now done by Claude Vision in server.js
 };
