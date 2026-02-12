@@ -1,6 +1,6 @@
 /**
- * Fire Safety Checker - Railway Server v18
- * DXF: Pure text analysis - NO images, NO SVG, NO PNG
+ * Fire Safety Checker - Railway Server v19
+ * DXF: Pure text analysis + RAW DIAGNOSTICS
  * DWG: APS + Claude Vision (unchanged)
  */
 
@@ -571,7 +571,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '18.0.0-railway'
+    version: '19.0.0-railway'
   });
 });
 
@@ -782,5 +782,5 @@ app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 18.0.0-railway`);
+  console.log(`   Version: 19.0.0-railway`);
 });

@@ -1,14 +1,116 @@
-// dxf-analyzer.js v11 - PURE TEXT EXTRACTION
+// dxf-analyzer.js v12 - PURE TEXT EXTRACTION + RAW DIAGNOSTICS
 // NO IMAGES. NO SVG. NO PNG. NO SHARP.
 // Parses ALL entities, stores only important ones, counts the rest.
 
 const fs = require('fs');
 const readline = require('readline');
 
+// ============ RAW FILE DIAGNOSTICS ============
+function runRawDiagnostics(filePath) {
+  console.log('\n=== RAW FILE DIAGNOSTICS ===');
+
+  const stats = fs.statSync(filePath);
+  console.log(`  File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+
+  // Read raw file content
+  console.log('  Reading raw file for diagnostics...');
+  const rawContent = fs.readFileSync(filePath, 'utf8');
+  console.log(`  Raw content length: ${rawContent.length} characters`);
+
+  // Count entity types by searching for the DXF markers
+  // In DXF format: code 0 on one line, then entity type on next line
+  const entityMarkers = ['TEXT', 'MTEXT', 'ARC', 'CIRCLE', 'INSERT', 'DIMENSION', 'HATCH', 'SPLINE', 'ATTRIB', 'ATTDEF', 'LINE', 'LWPOLYLINE', 'POLYLINE'];
+  console.log('  Scanning for entity type markers...');
+
+  entityMarkers.forEach(marker => {
+    // DXF format: \n0\nENTITY_TYPE\n or with spaces/tabs
+    const regex = new RegExp(`\\n\\s*0\\s*\\n\\s*${marker}\\s*\\n`, 'gi');
+    const matches = rawContent.match(regex) || [];
+    if (matches.length > 0) {
+      console.log(`  RAW SCAN: Found ${matches.length} ${marker} entities`);
+    }
+  });
+
+  // Also try alternate pattern (some DXF files have different formatting)
+  console.log('  Trying alternate entity patterns...');
+  entityMarkers.forEach(marker => {
+    // Just count occurrences of the entity name after a 0
+    const regex = new RegExp(`^\\s*0\\s*$[\\s\\S]*?^\\s*${marker}\\s*$`, 'gim');
+    const matches = rawContent.match(regex) || [];
+    if (matches.length > 0) {
+      console.log(`  RAW SCAN ALT: Found ${matches.length} ${marker} patterns`);
+    }
+  });
+
+  // Search for Hebrew text content anywhere in the file
+  const hebrewRegex = /[\u0590-\u05FF]+/g;
+  const hebrewMatches = rawContent.match(hebrewRegex) || [];
+  console.log(`  RAW SCAN: Found ${hebrewMatches.length} Hebrew text fragments`);
+  if (hebrewMatches.length > 0) {
+    const uniqueHebrew = [...new Set(hebrewMatches)].slice(0, 20);
+    console.log(`  RAW SCAN: First 20 unique Hebrew texts:`, uniqueHebrew);
+  }
+
+  // Search for common fire safety terms
+  const fireTerms = ['EXIT', 'FIRE', 'SD', 'SPR', 'FE', 'FD', 'אש', 'יציאה', 'מטף', 'גלאי', 'ספרינקלר', 'מדרגות', 'חירום'];
+  console.log('  Searching for fire safety terms...');
+  fireTerms.forEach(term => {
+    const regex = new RegExp(term, 'gi');
+    const matches = rawContent.match(regex) || [];
+    if (matches.length > 0) {
+      console.log(`  RAW SCAN: "${term}" appears ${matches.length} times`);
+    }
+  });
+
+  // Check for code 1 (text content marker in DXF)
+  const code1Pattern = /\n\s*1\s*\n([^\n]+)/g;
+  const code1Matches = [];
+  let match;
+  while ((match = code1Pattern.exec(rawContent)) !== null && code1Matches.length < 50) {
+    const text = match[1].trim();
+    if (text.length > 0 && text.length < 200) {
+      code1Matches.push(text);
+    }
+  }
+  console.log(`  RAW SCAN: Found ${code1Matches.length} code-1 text values (first 50)`);
+  if (code1Matches.length > 0) {
+    console.log(`  RAW SCAN: Sample texts:`, code1Matches.slice(0, 20));
+  }
+
+  // Check encoding - look for high bytes
+  const binaryContent = fs.readFileSync(filePath, 'latin1');
+  const highBytes = binaryContent.match(/[\x80-\xFF]/g) || [];
+  console.log(`  RAW SCAN: High bytes (non-ASCII): ${highBytes.length}`);
+
+  // Check for ENTITIES section
+  const entitiesSectionMatch = rawContent.match(/\n\s*0\s*\nSECTION\s*\n\s*2\s*\nENTITIES/i);
+  console.log(`  RAW SCAN: ENTITIES section found: ${entitiesSectionMatch ? 'YES' : 'NO'}`);
+
+  // Check for BLOCKS section
+  const blocksSectionMatch = rawContent.match(/\n\s*0\s*\nSECTION\s*\n\s*2\s*\nBLOCKS/i);
+  console.log(`  RAW SCAN: BLOCKS section found: ${blocksSectionMatch ? 'YES' : 'NO'}`);
+
+  // Count total lines
+  const lineCount = rawContent.split('\n').length;
+  console.log(`  RAW SCAN: Total lines in file: ${lineCount}`);
+
+  console.log('=== END RAW DIAGNOSTICS ===\n');
+
+  return {
+    fileSize: stats.size,
+    charCount: rawContent.length,
+    lineCount,
+    hebrewCount: hebrewMatches.length,
+    highByteCount: highBytes.length,
+    code1Count: code1Matches.length,
+    sampleTexts: code1Matches.slice(0, 20)
+  };
+}
+
 // ============ STREAMING PARSER - PARSES ALL ENTITIES ============
 async function parseDXFStreaming(filePath) {
   return new Promise((resolve, reject) => {
-    console.log('  DXF Parser v11 - Full parse, no truncation...');
+    console.log('  DXF Parser v12 - Full parse, no truncation...');
 
     const fileStream = fs.createReadStream(filePath, {
       encoding: 'utf8',
@@ -457,8 +559,12 @@ LAYERS: ${layers.join(', ') || 'Only layer 0'}
 
 // ============ MAIN FUNCTION - NO IMAGES ============
 async function analyzeDXF(filePath) {
-  console.log('DXF Analysis v11 - Pure text extraction (NO IMAGES)...');
+  console.log('DXF Analysis v12 - Pure text extraction (NO IMAGES)...');
 
+  // STEP 1: Run raw diagnostics BEFORE parsing
+  const diagnostics = runRawDiagnostics(filePath);
+
+  // STEP 2: Parse with streaming
   const parsed = await parseDXFStreaming(filePath);
 
   console.log('  Building vector summary for Claude...');
