@@ -1,4 +1,4 @@
-// dxf-analyzer.js v8 - Rendering only, Claude Vision does the analysis
+// dxf-analyzer.js v9 - High-quality rendering, Claude Vision does the analysis
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -968,7 +968,7 @@ async function renderToSVGFile(entities, classified, width, outputPath) {
 // ============ MAIN ============
 // v8: Rendering only - scoring is done by Claude Vision in server.js
 async function analyzeDXF(filePath) {
-  console.log('Vector DXF rendering v8 (Claude Vision will analyze)...');
+  console.log('Vector DXF rendering v9 (high-quality PNG for Claude Vision)...');
   console.log('  Memory limits: ' + MAX_ENTITIES_AFTER_EXPANSION + ' entities max, ' + MAX_ENTITIES_FOR_SVG + ' for SVG');
 
   let parsed = await parseDXFStreaming(filePath);
@@ -1047,14 +1047,18 @@ async function analyzeDXF(filePath) {
     console.log('  Manual GC triggered');
   }
 
-  // Convert SVG to PNG for Claude Vision
+  // Convert SVG to PNG for Claude Vision (high quality)
   let pngBuffer = null;
   let svg = null;
 
   try {
     const sharp = require('sharp');
-    pngBuffer = await sharp(svgPath).png({ compressionLevel: 6 }).toBuffer();
-    console.log('  PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB');
+    // Use density: 150 for high-quality SVG to PNG conversion
+    // This ensures text and fine details are preserved from the 19MB SVG
+    pngBuffer = await sharp(svgPath, { density: 150 })
+      .png({ compressionLevel: 6, quality: 90 })
+      .toBuffer();
+    console.log('  PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB (density: 150)');
     svg = fs.readFileSync(svgPath, 'utf8');
     console.log('  SVG: ' + (svg.length / 1024).toFixed(0) + 'KB');
   } catch (e) {

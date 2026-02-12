@@ -1,5 +1,5 @@
 /**
- * Fire Safety Checker - Railway Server v14
+ * Fire Safety Checker - Railway Server v15
  * Standalone Express server for Railway deployment
  */
 
@@ -451,7 +451,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '14.0.0-railway'
+    version: '15.0.0-railway'
   });
 });
 
@@ -503,8 +503,20 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
   const startTime = Date.now();
   let extractedFilePath = null;
 
+  // Timeout protection - prevent hanging containers
+  const ANALYSIS_TIMEOUT = 300000; // 5 minutes
+  const timeoutId = setTimeout(() => {
+    if (!res.headersSent) {
+      console.error('Analysis timed out after 5 minutes');
+      res.status(504).json({ error: 'Analysis timed out after 5 minutes' });
+    }
+  }, ANALYSIS_TIMEOUT);
+
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file' });
+    if (!req.file) {
+      clearTimeout(timeoutId);
+      return res.status(400).json({ error: 'No file' });
+    }
 
     // Extract from ZIP if needed
     let filePath = req.file.path;
@@ -517,6 +529,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       filePath = extracted.filePath;
       originalName = extracted.originalName;
     } catch (zipErr) {
+      clearTimeout(timeoutId);
       return res.status(400).json({ error: zipErr.message });
     }
 
@@ -614,6 +627,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       try { fs.unlinkSync(req.file.path); } catch(e) {}
       if (extractedFilePath) try { fs.unlinkSync(extractedFilePath); } catch(e) {}
 
+      clearTimeout(timeoutId);
       return res.json({
         success: true,
         filename: originalName,
@@ -675,6 +689,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     try { fs.unlinkSync(req.file.path); } catch(e) {}
     if (extractedFilePath) try { fs.unlinkSync(extractedFilePath); } catch(e) {}
 
+    clearTimeout(timeoutId);
     res.json({
       success: true,
       filename: originalName,
@@ -688,10 +703,13 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       processingTime: `${((Date.now() - startTime) / 1000).toFixed(1)}s`
     });
   } catch (e) {
+    clearTimeout(timeoutId);
     console.error('Analysis error:', e);
     if (req.file?.path && fs.existsSync(req.file.path)) try { fs.unlinkSync(req.file.path); } catch(err) {}
     if (extractedFilePath && fs.existsSync(extractedFilePath)) try { fs.unlinkSync(extractedFilePath); } catch(err) {}
-    res.status(500).json({ error: e.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: e.message });
+    }
   }
 });
 
@@ -708,5 +726,5 @@ app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 14.0.0-railway`);
+  console.log(`   Version: 15.0.0-railway`);
 });
