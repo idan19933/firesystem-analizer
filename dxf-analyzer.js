@@ -1055,10 +1055,26 @@ async function analyzeDXF(filePath) {
     const sharp = require('sharp');
     // Use density: 150 for high-quality SVG to PNG conversion
     // This ensures text and fine details are preserved from the 19MB SVG
-    pngBuffer = await sharp(svgPath, { density: 150 })
+    let rawPng = await sharp(svgPath, { density: 150 })
       .png({ compressionLevel: 6, quality: 90 })
       .toBuffer();
-    console.log('  PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB (density: 150)');
+    console.log('  PNG: ' + (rawPng.length / 1024).toFixed(0) + 'KB (density: 150)');
+
+    // Claude Vision API rejects images > 8000px on any dimension
+    const metadata = await sharp(rawPng).metadata();
+    if (metadata.width > 8000 || metadata.height > 8000) {
+      pngBuffer = await sharp(rawPng)
+        .resize(8000, 8000, { fit: 'inside', withoutEnlargement: true })
+        .png({ compressionLevel: 6 })
+        .toBuffer();
+      console.log('  Resized from ' + metadata.width + 'x' + metadata.height + ' to fit 8000x8000');
+      console.log('  Final PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB');
+    } else {
+      pngBuffer = rawPng;
+      console.log('  PNG size OK: ' + metadata.width + 'x' + metadata.height);
+    }
+    rawPng = null; // Free memory
+
     svg = fs.readFileSync(svgPath, 'utf8');
     console.log('  SVG: ' + (svg.length / 1024).toFixed(0) + 'KB');
   } catch (e) {
