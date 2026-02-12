@@ -1,22 +1,30 @@
-// dxf-analyzer.js v4 - Optimized for 1M+ entity DXF files
+// dxf-analyzer.js v5 - Ultra memory-optimized for 1M+ entity DXF files
 const fs = require('fs');
+const path = require('path');
 const readline = require('readline');
+const os = require('os');
+
+// Hard limits to prevent OOM
+const MAX_ENTITIES_AFTER_EXPANSION = 500000;
+const MAX_ENTITIES_FOR_SVG = 200000;
 
 // ============ STREAMING PARSER ============
-// Process DXF file line-by-line without loading entire token array into memory
-
 async function parseDXFStreaming(filePath) {
   return new Promise((resolve, reject) => {
-    console.log('  Starting streaming parse...');
+    console.log('  Starting streaming parse (memory-optimized)...');
 
-    const fileStream = fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 });
-    const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+    const fileStream = fs.createReadStream(filePath, {
+      encoding: 'utf8',
+      highWaterMark: 64 * 1024 // 64KB chunks
+    });
+    const rl = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity
+    });
 
-    // State machine
-    let lineNum = 0;
+    // State machine - minimal memory footprint
     let pendingCode = null;
     let currentSection = null;
-    let sectionName = null;
     let inBlock = false;
     let currentBlockName = null;
     let currentBlockBaseX = 0;
@@ -35,17 +43,19 @@ async function parseDXFStreaming(filePath) {
     let entityVerts = [];
     let curVx = null;
 
-    // Debug: track first entities for layer debugging
+    // Debug: track first entities
     let debugEntities = [];
     const DEBUG_LIMIT = 20;
 
-    // Track section boundaries
-    let afterSectionMarker = false;
+    // Section tracking
     let expectSectionName = false;
 
     // Layers parsing state
     let parsingLayer = false;
     let layerData = {};
+
+    // Entity count tracking
+    let rawEntityCount = 0;
 
     const ENTITY_TYPES = new Set(['LINE', 'CIRCLE', 'ARC', 'TEXT', 'MTEXT', 'INSERT', 'LWPOLYLINE', 'POLYLINE', 'SOLID', 'ELLIPSE', 'POINT', 'SPLINE']);
 
@@ -76,6 +86,7 @@ async function parseDXFStreaming(filePath) {
         blockEntities.push(entityData);
       } else if (currentSection === 'ENTITIES') {
         entities.push(entityData);
+        rawEntityCount++;
       }
 
       // Reset
@@ -90,7 +101,6 @@ async function parseDXFStreaming(filePath) {
       // Section handling
       if (code === 0) {
         if (value === 'SECTION') {
-          afterSectionMarker = true;
           expectSectionName = true;
           return;
         }
@@ -139,7 +149,6 @@ async function parseDXFStreaming(filePath) {
             return;
           }
           if (parsingLayer && value !== 'LAYER') {
-            // End of layer definition
             if (layerData.name) {
               layers[layerData.name] = { color: layerData.color, ltype: layerData.ltype };
             }
@@ -165,9 +174,7 @@ async function parseDXFStreaming(filePath) {
       // Section name capture
       if (expectSectionName && code === 2) {
         currentSection = value;
-        sectionName = value;
         expectSectionName = false;
-        afterSectionMarker = false;
         return;
       }
 
@@ -222,7 +229,6 @@ async function parseDXFStreaming(filePath) {
     }
 
     rl.on('line', (line) => {
-      lineNum++;
       const trimmed = line.trim();
 
       if (pendingCode === null) {
@@ -239,46 +245,94 @@ async function parseDXFStreaming(filePath) {
     rl.on('close', () => {
       finalizeEntity();
 
-      // Debug output: first 20 entities
+      // Debug output
       console.log('  DEBUG: First ' + debugEntities.length + ' entities:');
       debugEntities.forEach((e, i) => {
-        console.log('    [' + i + '] type=' + e.type + ', layer=' + e.layer + (e.text ? ', text=' + e.text.substring(0, 30) : '') + (e.blockName ? ', block=' + e.blockName : ''));
+        console.log('    [' + i + '] type=' + e.type + ', layer=' + e.layer +
+          (e.text ? ', text=' + e.text.substring(0, 30) : '') +
+          (e.blockName ? ', block=' + e.blockName : ''));
       });
 
-      console.log('  Raw parse complete: ' + entities.length + ' entities, ' + Object.keys(blocks).length + ' blocks, ' + Object.keys(layers).length + ' layers');
+      console.log('  Raw parse: ' + entities.length + ' entities, ' +
+        Object.keys(blocks).length + ' blocks, ' +
+        Object.keys(layers).length + ' layers');
 
-      // Expand block references
+      // Expand block references with hard limit
       const expanded = [];
+      let expandedCount = 0;
+      let truncated = false;
+
       function expand(ents, ox, oy, sx, sy, depth) {
         if (depth > 5) return;
+        if (truncated) return;
+
         for (let i = 0; i < ents.length; i++) {
+          if (expandedCount >= MAX_ENTITIES_AFTER_EXPANSION) {
+            truncated = true;
+            console.log('  WARNING: Hit ' + MAX_ENTITIES_AFTER_EXPANSION + ' entity limit, truncating');
+            return;
+          }
+
           const ent = ents[i];
           if (ent.type === 'INSERT' && blocks[ent.blockName]) {
             const b = blocks[ent.blockName];
             const isx = (ent.scaleX || 1) * sx;
             const isy = (ent.scaleY || 1) * sy;
-            expand(b.entities, (ent.x || 0) + ox - b.baseX * isx, (ent.y || 0) + oy - b.baseY * isy, isx, isy, depth + 1);
+            expand(b.entities,
+              (ent.x || 0) + ox - b.baseX * isx,
+              (ent.y || 0) + oy - b.baseY * isy,
+              isx, isy, depth + 1);
           } else {
-            const e = {};
-            for (const key in ent) e[key] = ent[key];
-            if (e.x !== undefined) { e.x = e.x * sx + ox; e.y = (e.y || 0) * sy + oy; }
-            if (e.x2 !== undefined) { e.x2 = e.x2 * sx + ox; e.y2 = (e.y2 || 0) * sy + oy; }
-            if (e.radius !== undefined) e.radius = e.radius * Math.abs(sx);
-            if (e.vertices) e.vertices = e.vertices.map(v => ({ x: v.x * sx + ox, y: v.y * sy + oy }));
+            // Clone entity with transformed coordinates
+            const e = {
+              type: ent.type,
+              layer: ent.layer,
+              linetype: ent.linetype,
+              color: ent.color
+            };
+
+            if (ent.x !== undefined) {
+              e.x = ent.x * sx + ox;
+              e.y = (ent.y || 0) * sy + oy;
+            }
+            if (ent.x2 !== undefined) {
+              e.x2 = ent.x2 * sx + ox;
+              e.y2 = (ent.y2 || 0) * sy + oy;
+            }
+            if (ent.radius !== undefined) e.radius = ent.radius * Math.abs(sx);
+            if (ent.text !== undefined) e.text = ent.text;
+            if (ent.height !== undefined) e.height = ent.height;
+            if (ent.blockName !== undefined) e.blockName = ent.blockName;
+            if (ent.startAngle !== undefined) e.startAngle = ent.startAngle;
+            if (ent.endAngle !== undefined) e.endAngle = ent.endAngle;
+            if (ent.rotation !== undefined) e.rotation = ent.rotation;
+
+            if (ent.vertices) {
+              e.vertices = ent.vertices.map(v => ({
+                x: v.x * sx + ox,
+                y: v.y * sy + oy
+              }));
+            }
+
             expanded.push(e);
+            expandedCount++;
           }
         }
       }
+
       expand(entities, 0, 0, 1, 1, 0);
 
-      console.log('  Expanded: ' + expanded.length + ' entities');
+      console.log('  Expanded: ' + expanded.length + ' entities' + (truncated ? ' (TRUNCATED)' : ''));
+
+      // Free raw entities immediately
+      entities.length = 0;
 
       resolve({
         entities: expanded,
         blocks: blocks,
         layers: layers,
-        raw: entities,
-        blockCount: Object.keys(blocks).length
+        blockCount: Object.keys(blocks).length,
+        truncated: truncated
       });
     });
 
@@ -298,7 +352,6 @@ function classifyEntities(parsed) {
     stats: { total: 0, classified: 0, byLayer: {}, byType: {} }
   };
 
-  // Layer patterns - support Hebrew encoding variants
   const LP = {
     walls: /wall|קיר|A[-_]?WALL|^KIR$|WALL[-_]/i,
     doors: /^door|דלת|A[-_]?DOOR|^DELET$|DOOR[-_]/i,
@@ -361,7 +414,6 @@ function classifyEntities(parsed) {
 
     let matched = false;
 
-    // Match by layer name
     for (let li = 0; li < lpKeys.length && !matched; li++) {
       if (LP[lpKeys[li]].test(ent.layer || '')) {
         C[lpKeys[li]].push(ent);
@@ -369,7 +421,6 @@ function classifyEntities(parsed) {
       }
     }
 
-    // Match text content
     if (!matched && (ent.type === 'TEXT' || ent.type === 'MTEXT') && ent.text) {
       C.texts.push(ent);
       for (let ti = 0; ti < tpKeys.length && !matched; ti++) {
@@ -380,7 +431,6 @@ function classifyEntities(parsed) {
       }
     }
 
-    // Match by block name
     if (!matched && ent.type === 'INSERT' && ent.blockName) {
       for (let bi = 0; bi < bpKeys.length && !matched; bi++) {
         if (BP[bpKeys[bi]].test(ent.blockName)) {
@@ -390,7 +440,6 @@ function classifyEntities(parsed) {
       }
     }
 
-    // Only classify circles as sprinklers if on fire/system layer
     if (!matched && ent.type === 'CIRCLE' && ent.radius && ent.radius < 0.5) {
       const cl = (ent.layer || '0').toUpperCase();
       if (/FIRE|SPRINK|SYSTEM|מתז|ספרינק/i.test(cl) && cl !== '0') {
@@ -403,11 +452,11 @@ function classifyEntities(parsed) {
     if (matched) C.stats.classified++;
   }
 
-  // Log layer statistics
+  // Log top layers
   const sortedLayers = Object.entries(C.stats.byLayer)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 20);
-  console.log('  Top 20 layers by entity count:');
+  console.log('  Top 20 layers:');
   sortedLayers.forEach(([name, count]) => {
     console.log('    ' + name + ': ' + count);
   });
@@ -451,8 +500,7 @@ function analyzeGeometry(classified) {
   function computeSpacing(items) {
     const p = items.filter(e => e.x !== undefined).map(e => ({ x: e.x, y: e.y }));
     if (p.length < 2) return [];
-    // Sample for large sets to avoid O(n^2)
-    const sample = p.length > 1000 ? p.filter((_, i) => i % Math.ceil(p.length / 1000) === 0) : p;
+    const sample = p.length > 500 ? p.filter((_, i) => i % Math.ceil(p.length / 500) === 0) : p;
     return sample.map((pt, i) => {
       let min = Infinity;
       for (let j = 0; j < sample.length; j++) {
@@ -501,26 +549,20 @@ function checkFireSafetyRules(classified, geometry) {
     summaryHe: ''
   };
 
-  const allText = classified.texts.map(t => t.text || '').join(' ');
+  const allText = classified.texts.slice(0, 1000).map(t => t.text || '').join(' ');
   if (/office|משרד/i.test(allText)) R.buildingType = 'מבנה משרדים';
   else if (/resid|מגור/i.test(allText)) R.buildingType = 'מבנה מגורים';
 
   const scores = [];
   const avg = (a) => a.length ? a.reduce((s, v) => s + v, 0) / a.length : null;
 
-  // Category 1: Access Roads
+  // Category 1
   const ac = classified.accessRoads.length;
   let s1 = ac > 0 ? 70 : 20;
-  R.categories.push({
-    id: 1, nameHe: 'דרכי גישה',
-    status: ac > 0 ? 'דורש_בדיקה' : 'נכשל',
-    score: s1,
-    findings: [ac + ' אלמנטי גישה'],
-    recommendations: ac === 0 ? ['לסמן דרך גישה 3.5מ'] : []
-  });
+  R.categories.push({ id: 1, nameHe: 'דרכי גישה', status: ac > 0 ? 'דורש_בדיקה' : 'נכשל', score: s1, findings: [ac + ' אלמנטי גישה'], recommendations: ac === 0 ? ['לסמן דרך גישה 3.5מ'] : [] });
   scores.push(s1);
 
-  // Category 2: Escape Routes
+  // Category 2
   const exitC = classified.exits.length + classified.stairs.length;
   const maxT = geometry.maxTravelDistances.length ? Math.max(...geometry.maxTravelDistances) : null;
   let s2 = 50;
@@ -528,21 +570,12 @@ function checkFireSafetyRules(classified, geometry) {
   const r2 = [];
   if (exitC >= 2) { s2 += 30; f2.push('2+ יציאות'); }
   else { r2.push('נדרשות 2 יציאות'); R.criticalIssues.push('פחות מ-2 יציאות'); }
-  if (maxT !== null) {
-    f2.push('מרחק מילוט: ' + maxT.toFixed(1) + 'מ');
-    if (maxT > 40) { s2 -= 20; r2.push('מרחק>40מ'); }
-  }
-  if (classified.fireDoors.length > 0) s2 += 10;
-  else r2.push('לסמן דלתות אש');
-  R.categories.push({
-    id: 2, nameHe: 'דרכי מילוט ויציאות',
-    status: s2 >= 70 ? 'עובר' : s2 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: Math.min(100, Math.max(0, s2)),
-    findings: f2, recommendations: r2
-  });
+  if (maxT !== null) { f2.push('מרחק מילוט: ' + maxT.toFixed(1) + 'מ'); if (maxT > 40) { s2 -= 20; r2.push('מרחק>40מ'); } }
+  if (classified.fireDoors.length > 0) s2 += 10; else r2.push('לסמן דלתות אש');
+  R.categories.push({ id: 2, nameHe: 'דרכי מילוט ויציאות', status: s2 >= 70 ? 'עובר' : s2 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, Math.max(0, s2)), findings: f2, recommendations: r2 });
   scores.push(s2);
 
-  // Category 3: Detection System
+  // Category 3
   let s3 = 20;
   if (classified.smokeDetectors.length > 0) s3 += 25;
   if (classified.heatDetectors.length > 0) s3 += 10;
@@ -551,32 +584,20 @@ function checkFireSafetyRules(classified, geometry) {
   const ad = avg(geometry.detectorSpacing);
   const f3 = ['גלאי עשן: ' + classified.smokeDetectors.length, 'גלאי חום: ' + classified.heatDetectors.length];
   if (ad) f3.push('מרחק גלאים: ' + ad.toFixed(1) + 'מ');
-  R.categories.push({
-    id: 3, nameHe: 'מערכת גילוי',
-    status: s3 >= 70 ? 'עובר' : s3 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: Math.min(100, s3),
-    findings: f3,
-    recommendations: classified.smokeDetectors.length === 0 ? ['להוסיף גלאי עשן'] : []
-  });
+  R.categories.push({ id: 3, nameHe: 'מערכת גילוי', status: s3 >= 70 ? 'עובר' : s3 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s3), findings: f3, recommendations: classified.smokeDetectors.length === 0 ? ['להוסיף גלאי עשן'] : [] });
   scores.push(s3);
 
-  // Category 4: Sprinkler System
+  // Category 4
   let s4 = classified.sprinklers.length > 0 ? 50 : 10;
   const aspr = avg(geometry.sprinklerSpacing);
   if (aspr && aspr <= 4.5) s4 += 30;
   if (classified.sprinklers.length > 5) s4 += 10;
   const f4 = ['מתזים: ' + classified.sprinklers.length];
   if (aspr) f4.push('מרחק: ' + aspr.toFixed(1) + 'מ');
-  R.categories.push({
-    id: 4, nameHe: 'מערכת מתזים',
-    status: s4 >= 70 ? 'עובר' : s4 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: Math.min(100, s4),
-    findings: f4,
-    recommendations: classified.sprinklers.length === 0 ? ['לבדוק חובת מתזים'] : []
-  });
+  R.categories.push({ id: 4, nameHe: 'מערכת מתזים', status: s4 >= 70 ? 'עובר' : s4 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s4), findings: f4, recommendations: classified.sprinklers.length === 0 ? ['לבדוק חובת מתזים'] : [] });
   scores.push(s4);
 
-  // Category 5: Fire Fighting Equipment
+  // Category 5
   let s5 = 20;
   if (classified.fireExtinguishers.length > 0) s5 += 25;
   if (classified.hydrants.length > 0) s5 += 25;
@@ -588,63 +609,35 @@ function checkFireSafetyRules(classified, geometry) {
   const r5 = [];
   if (classified.fireExtinguishers.length === 0) r5.push('להוסיף מטפים');
   if (classified.hydrants.length === 0) r5.push('להוסיף ברזים');
-  R.categories.push({
-    id: 5, nameHe: 'ציוד כיבוי',
-    status: s5 >= 70 ? 'עובר' : s5 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: Math.min(100, s5),
-    findings: f5, recommendations: r5
-  });
+  R.categories.push({ id: 5, nameHe: 'ציוד כיבוי', status: s5 >= 70 ? 'עובר' : s5 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s5), findings: f5, recommendations: r5 });
   scores.push(s5);
 
-  // Category 6: Fire Separation
+  // Category 6
   let s6 = 30;
   if (classified.fireWalls.length > 0) s6 += 30;
   if (classified.fireDoors.length > 0) s6 += 20;
-  R.categories.push({
-    id: 6, nameHe: 'הפרדות אש',
-    status: s6 >= 70 ? 'עובר' : s6 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: s6,
-    findings: ['קירות אש: ' + classified.fireWalls.length, 'דלתות אש: ' + classified.fireDoors.length],
-    recommendations: classified.fireWalls.length === 0 ? ['לסמן קירות אש'] : []
-  });
+  R.categories.push({ id: 6, nameHe: 'הפרדות אש', status: s6 >= 70 ? 'עובר' : s6 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: s6, findings: ['קירות אש: ' + classified.fireWalls.length, 'דלתות אש: ' + classified.fireDoors.length], recommendations: classified.fireWalls.length === 0 ? ['לסמן קירות אש'] : [] });
   scores.push(s6);
 
-  // Category 7: Emergency Lighting
+  // Category 7
   let s7 = 20;
   if (classified.emergencyLights.length > 0) s7 += 30;
   if (classified.exitSigns.length > 0) s7 += 30;
-  R.categories.push({
-    id: 7, nameHe: 'תאורת חירום ושילוט',
-    status: s7 >= 70 ? 'עובר' : s7 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: s7,
-    findings: ['תאורת חירום: ' + classified.emergencyLights.length, 'שלטי יציאה: ' + classified.exitSigns.length],
-    recommendations: []
-  });
+  R.categories.push({ id: 7, nameHe: 'תאורת חירום ושילוט', status: s7 >= 70 ? 'עובר' : s7 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: s7, findings: ['תאורת חירום: ' + classified.emergencyLights.length, 'שלטי יציאה: ' + classified.exitSigns.length], recommendations: [] });
   scores.push(s7);
 
-  // Category 8: Smoke Control
+  // Category 8
   const sv = classified.smokeVents.length;
   let s8 = sv > 0 ? 60 : 15;
-  R.categories.push({
-    id: 8, nameHe: 'שליטה בעשן',
-    status: s8 >= 60 ? 'דורש_בדיקה' : 'נכשל',
-    score: s8,
-    findings: ['פתחי עשן: ' + sv],
-    recommendations: sv === 0 ? ['מערכת שחרור עשן'] : []
-  });
+  R.categories.push({ id: 8, nameHe: 'שליטה בעשן', status: s8 >= 60 ? 'דורש_בדיקה' : 'נכשל', score: s8, findings: ['פתחי עשן: ' + sv], recommendations: sv === 0 ? ['מערכת שחרור עשן'] : [] });
   scores.push(s8);
 
-  // Category 9: Documentation
+  // Category 9
   let s9 = 20;
-  if (classified.texts.some(t => /plan|תוכנית/i.test(t.text || ''))) s9 += 20;
-  if (classified.texts.some(t => /scale|קנה|1:/i.test(t.text || ''))) s9 += 20;
-  R.categories.push({
-    id: 9, nameHe: 'תיעוד',
-    status: s9 >= 70 ? 'עובר' : s9 >= 40 ? 'דורש_בדיקה' : 'נכשל',
-    score: Math.min(100, s9),
-    findings: ['טקסטים: ' + classified.texts.length, 'שכבות: ' + Object.keys(classified.stats.byLayer).length],
-    recommendations: []
-  });
+  const textSample = classified.texts.slice(0, 500);
+  if (textSample.some(t => /plan|תוכנית/i.test(t.text || ''))) s9 += 20;
+  if (textSample.some(t => /scale|קנה|1:/i.test(t.text || ''))) s9 += 20;
+  R.categories.push({ id: 9, nameHe: 'תיעוד', status: s9 >= 70 ? 'עובר' : s9 >= 40 ? 'דורש_בדיקה' : 'נכשל', score: Math.min(100, s9), findings: ['טקסטים: ' + classified.texts.length, 'שכבות: ' + Object.keys(classified.stats.byLayer).length], recommendations: [] });
   scores.push(s9);
 
   R.overallScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
@@ -655,16 +648,14 @@ function checkFireSafetyRules(classified, geometry) {
   return R;
 }
 
-// ============ SMART BOUNDS (IQR) ============
-function computeSmartBounds(entities, maxSample) {
-  maxSample = maxSample || 100000;
-
-  // Sample entities if too many
+// ============ SMART BOUNDS ============
+function computeSmartBounds(entities) {
+  // Sample for bounds calculation
+  const maxSample = 50000;
   let sample = entities;
   if (entities.length > maxSample) {
     const step = Math.ceil(entities.length / maxSample);
     sample = entities.filter((_, i) => i % step === 0);
-    console.log('  Bounds sampling: ' + entities.length + ' → ' + sample.length);
   }
 
   const xs = [], ys = [];
@@ -683,8 +674,7 @@ function computeSmartBounds(entities, maxSample) {
       xs.push(e.x);
       ys.push(e.y);
     } else if ((e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') && e.vertices && e.vertices.length > 0) {
-      // Sample vertices for large polylines
-      const verts = e.vertices.length > 100 ? e.vertices.filter((_, i) => i % Math.ceil(e.vertices.length / 100) === 0) : e.vertices;
+      const verts = e.vertices.length > 50 ? e.vertices.filter((_, i) => i % Math.ceil(e.vertices.length / 50) === 0) : e.vertices;
       verts.forEach(v => { xs.push(v.x); ys.push(v.y); });
     }
   }
@@ -732,15 +722,14 @@ function computeSmartBounds(entities, maxSample) {
   return { minX: minX - padX, maxX: maxX + padX, minY: minY - padY, maxY: maxY + padY };
 }
 
-// ============ SVG RENDERER (OPTIMIZED) ============
-function renderToSVG(entities, classified, width) {
+// ============ SVG RENDERER (STREAM TO FILE) ============
+async function renderToSVGFile(entities, classified, width, outputPath) {
   width = width || 4000;
-  const MAX_RENDER_ENTITIES = 300000;
 
-  // Downsample if too many entities
+  // Downsample if needed
   let entitiesToRender = entities;
-  if (entities.length > MAX_RENDER_ENTITIES) {
-    const step = Math.ceil(entities.length / MAX_RENDER_ENTITIES);
+  if (entities.length > MAX_ENTITIES_FOR_SVG) {
+    const step = Math.ceil(entities.length / MAX_ENTITIES_FOR_SVG);
     entitiesToRender = entities.filter((_, i) => i % step === 0);
     console.log('  Downsampled for rendering: ' + entities.length + ' → ' + entitiesToRender.length);
   }
@@ -772,7 +761,7 @@ function renderToSVG(entities, classified, width) {
     exits: '#15803d', windows: '#06b6d4', unknown: '#94a3b8'
   };
 
-  // Build style map for classified entities
+  // Build style map
   const styles = new Map();
   classified.walls.forEach(e => styles.set(e, { c: COL.walls, w: 2.0 }));
   classified.doors.forEach(e => styles.set(e, { c: COL.doors, w: 2.5 }));
@@ -782,7 +771,6 @@ function renderToSVG(entities, classified, width) {
   classified.exits.forEach(e => styles.set(e, { c: COL.exits, w: 2.5 }));
   classified.windows.forEach(e => styles.set(e, { c: COL.windows, w: 1.5 }));
 
-  // Track marker entities
   const markerSet = new Set();
   [classified.sprinklers, classified.smokeDetectors, classified.heatDetectors,
    classified.fireExtinguishers, classified.hydrants, classified.emergencyLights,
@@ -790,181 +778,244 @@ function renderToSVG(entities, classified, width) {
 
   const renderSkip = /^LOGO$|^IDAN_CROSS$|^POINTS$|^POINTS_BETON$/i;
 
-  // Use array and join for efficient string building
-  const parts = [];
-  parts.push('<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + totalH + '" viewBox="0 0 ' + width + ' ' + totalH + '">');
-  parts.push('<rect width="100%" height="100%" fill="#fafbfc"/>');
-  parts.push('<rect x="4" y="4" width="' + (width - 8) + '" height="' + (imgH - 8) + '" fill="white" stroke="#e2e8f0" rx="4"/>');
-  parts.push('<defs><style>text{font-family:Arial,sans-serif}</style></defs>');
+  // Write directly to file stream
+  return new Promise((resolve, reject) => {
+    const svgStream = fs.createWriteStream(outputPath);
 
-  // Draw geometry
-  for (let i = 0; i < entitiesToRender.length; i++) {
-    const ent = entitiesToRender[i];
-    if (markerSet.has(ent)) continue;
-    const entLayer = (ent.layer || '').toUpperCase();
-    if (renderSkip.test(entLayer)) continue;
+    svgStream.on('error', reject);
+    svgStream.on('finish', () => resolve(outputPath));
 
-    const s = styles.get(ent);
-    const col = s ? s.c : COL.unknown;
-    const w = s ? s.w : 0.7;
-    const dash = s && s.d ? ' stroke-dasharray="' + s.d + '"' : '';
+    // Header
+    svgStream.write('<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + totalH + '" viewBox="0 0 ' + width + ' ' + totalH + '">\n');
+    svgStream.write('<rect width="100%" height="100%" fill="#fafbfc"/>\n');
+    svgStream.write('<rect x="4" y="4" width="' + (width - 8) + '" height="' + (imgH - 8) + '" fill="white" stroke="#e2e8f0" rx="4"/>\n');
+    svgStream.write('<defs><style>text{font-family:Arial,sans-serif}</style></defs>\n');
 
-    if (ent.type === 'LINE' && ent.x !== undefined && ent.x2 !== undefined) {
-      parts.push('<line x1="' + tx(ent.x) + '" y1="' + ty(ent.y) + '" x2="' + tx(ent.x2) + '" y2="' + ty(ent.y2) + '" stroke="' + col + '" stroke-width="' + w + '"' + dash + ' stroke-linecap="round"/>');
-    } else if (ent.type === 'CIRCLE' && ent.radius) {
-      const r = Math.max(ent.radius * scale, 1);
-      parts.push('<circle cx="' + tx(ent.x) + '" cy="' + ty(ent.y) + '" r="' + r.toFixed(1) + '" stroke="' + col + '" fill="none" stroke-width="' + w + '"/>');
-    } else if (ent.type === 'ARC' && ent.radius) {
-      const ra = Math.max(ent.radius * scale, 1);
-      const sa = (ent.startAngle || 0) * Math.PI / 180;
-      const ea = (ent.endAngle || 360) * Math.PI / 180;
-      const ax1 = tx(ent.x + ent.radius * Math.cos(sa));
-      const ay1 = ty(ent.y + ent.radius * Math.sin(sa));
-      const ax2 = tx(ent.x + ent.radius * Math.cos(ea));
-      const ay2 = ty(ent.y + ent.radius * Math.sin(ea));
-      const la = ((ent.endAngle || 360) - (ent.startAngle || 0) + 360) % 360 > 180 ? 1 : 0;
-      parts.push('<path d="M' + ax1 + ',' + ay1 + ' A' + ra + ',' + ra + ' 0 ' + la + ',0 ' + ax2 + ',' + ay2 + '" stroke="' + col + '" fill="none" stroke-width="' + w + '"/>');
-    } else if ((ent.type === 'TEXT' || ent.type === 'MTEXT') && ent.text && ent.x !== undefined) {
-      let fs = Math.max((ent.height || 0.3) * scale * 0.55, 5);
-      if (fs > 40) fs = 40;
-      const esc = ent.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      parts.push('<text x="' + tx(ent.x) + '" y="' + ty(ent.y) + '" font-size="' + fs.toFixed(1) + '" fill="#4b5563">' + esc + '</text>');
-    } else if ((ent.type === 'LWPOLYLINE' || ent.type === 'POLYLINE') && ent.vertices && ent.vertices.length > 1) {
-      const pts = ent.vertices.map(v => tx(v.x) + ',' + ty(v.y)).join(' ');
-      parts.push('<polyline points="' + pts + '" stroke="' + col + '" fill="none" stroke-width="' + w + '"' + dash + '/>');
-    }
-  }
+    // Draw geometry
+    for (let i = 0; i < entitiesToRender.length; i++) {
+      const ent = entitiesToRender[i];
+      if (markerSet.has(ent)) continue;
+      const entLayer = (ent.layer || '').toUpperCase();
+      if (renderSkip.test(entLayer)) continue;
 
-  // Fire safety markers
-  function drawMarkers(items, color, shape) {
-    for (let mi = 0; mi < items.length; mi++) {
-      const e = items[mi];
-      if (e.x === undefined) continue;
-      const cx = parseFloat(tx(e.x)), cy = parseFloat(ty(e.y));
-      if (cx < 0 || cx > width || cy < 0 || cy > imgH) continue;
+      const s = styles.get(ent);
+      const col = s ? s.c : COL.unknown;
+      const w = s ? s.w : 0.7;
+      const dash = s && s.d ? ' stroke-dasharray="' + s.d + '"' : '';
 
-      if (shape === 'c') {
-        parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + mSize + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>');
-      } else if (shape === 'r') {
-        parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + mSize + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>');
-        parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="' + (mSize * 0.35) + '" fill="none" stroke="white" stroke-width="0.5"/>');
-      } else if (shape === 's') {
-        parts.push('<rect x="' + (cx - mSize) + '" y="' + (cy - mSize) + '" width="' + (mSize * 2) + '" height="' + (mSize * 2) + '" fill="' + color + '" stroke="white" stroke-width="0.7" rx="1" opacity="0.85"/>');
-      } else if (shape === 'd') {
-        parts.push('<polygon points="' + cx + ',' + (cy - mSize) + ' ' + (cx + mSize) + ',' + cy + ' ' + cx + ',' + (cy + mSize) + ' ' + (cx - mSize) + ',' + cy + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>');
-      } else if (shape === 't') {
-        parts.push('<polygon points="' + cx + ',' + (cy - mSize) + ' ' + (cx + mSize) + ',' + (cy + mSize * 0.7) + ' ' + (cx - mSize) + ',' + (cy + mSize * 0.7) + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>');
+      if (ent.type === 'LINE' && ent.x !== undefined && ent.x2 !== undefined) {
+        svgStream.write('<line x1="' + tx(ent.x) + '" y1="' + ty(ent.y) + '" x2="' + tx(ent.x2) + '" y2="' + ty(ent.y2) + '" stroke="' + col + '" stroke-width="' + w + '"' + dash + ' stroke-linecap="round"/>\n');
+      } else if (ent.type === 'CIRCLE' && ent.radius) {
+        const r = Math.max(ent.radius * scale, 1);
+        svgStream.write('<circle cx="' + tx(ent.x) + '" cy="' + ty(ent.y) + '" r="' + r.toFixed(1) + '" stroke="' + col + '" fill="none" stroke-width="' + w + '"/>\n');
+      } else if (ent.type === 'ARC' && ent.radius) {
+        const ra = Math.max(ent.radius * scale, 1);
+        const sa = (ent.startAngle || 0) * Math.PI / 180;
+        const ea = (ent.endAngle || 360) * Math.PI / 180;
+        const ax1 = tx(ent.x + ent.radius * Math.cos(sa));
+        const ay1 = ty(ent.y + ent.radius * Math.sin(sa));
+        const ax2 = tx(ent.x + ent.radius * Math.cos(ea));
+        const ay2 = ty(ent.y + ent.radius * Math.sin(ea));
+        const la = ((ent.endAngle || 360) - (ent.startAngle || 0) + 360) % 360 > 180 ? 1 : 0;
+        svgStream.write('<path d="M' + ax1 + ',' + ay1 + ' A' + ra + ',' + ra + ' 0 ' + la + ',0 ' + ax2 + ',' + ay2 + '" stroke="' + col + '" fill="none" stroke-width="' + w + '"/>\n');
+      } else if ((ent.type === 'TEXT' || ent.type === 'MTEXT') && ent.text && ent.x !== undefined) {
+        let fs = Math.max((ent.height || 0.3) * scale * 0.55, 5);
+        if (fs > 40) fs = 40;
+        const esc = ent.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        svgStream.write('<text x="' + tx(ent.x) + '" y="' + ty(ent.y) + '" font-size="' + fs.toFixed(1) + '" fill="#4b5563">' + esc + '</text>\n');
+      } else if ((ent.type === 'LWPOLYLINE' || ent.type === 'POLYLINE') && ent.vertices && ent.vertices.length > 1) {
+        const pts = ent.vertices.map(v => tx(v.x) + ',' + ty(v.y)).join(' ');
+        svgStream.write('<polyline points="' + pts + '" stroke="' + col + '" fill="none" stroke-width="' + w + '"' + dash + '/>\n');
       }
     }
-  }
 
-  drawMarkers(classified.sprinklers, COL.sprinklers, 'c');
-  drawMarkers(classified.smokeDetectors, COL.smokeDetectors, 'r');
-  drawMarkers(classified.heatDetectors, COL.heatDetectors, 'r');
-  drawMarkers(classified.fireExtinguishers, COL.fireExtinguishers, 's');
-  drawMarkers(classified.hydrants, COL.hydrants, 's');
-  drawMarkers(classified.emergencyLights, COL.emergencyLights, 'd');
-  drawMarkers(classified.exitSigns, COL.exitSigns, 't');
-  drawMarkers(classified.smokeVents, COL.smokeVents, 'd');
+    // Markers
+    function writeMarkers(items, color, shape) {
+      for (let mi = 0; mi < items.length; mi++) {
+        const e = items[mi];
+        if (e.x === undefined) continue;
+        const cx = parseFloat(tx(e.x)), cy = parseFloat(ty(e.y));
+        if (cx < 0 || cx > width || cy < 0 || cy > imgH) continue;
 
-  // Legend
-  const ly = imgH + 6;
-  parts.push('<rect x="4" y="' + ly + '" width="' + (width - 8) + '" height="' + (legH - 10) + '" fill="white" stroke="#e2e8f0" rx="4"/>');
-  parts.push('<text x="' + (width / 2) + '" y="' + (ly + 18) + '" text-anchor="middle" fill="#1e293b" font-size="12" font-weight="bold">מקרא - Legend</text>');
+        if (shape === 'c') {
+          svgStream.write('<circle cx="' + cx + '" cy="' + cy + '" r="' + mSize + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>\n');
+        } else if (shape === 'r') {
+          svgStream.write('<circle cx="' + cx + '" cy="' + cy + '" r="' + mSize + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>\n');
+          svgStream.write('<circle cx="' + cx + '" cy="' + cy + '" r="' + (mSize * 0.35) + '" fill="none" stroke="white" stroke-width="0.5"/>\n');
+        } else if (shape === 's') {
+          svgStream.write('<rect x="' + (cx - mSize) + '" y="' + (cy - mSize) + '" width="' + (mSize * 2) + '" height="' + (mSize * 2) + '" fill="' + color + '" stroke="white" stroke-width="0.7" rx="1" opacity="0.85"/>\n');
+        } else if (shape === 'd') {
+          svgStream.write('<polygon points="' + cx + ',' + (cy - mSize) + ' ' + (cx + mSize) + ',' + cy + ' ' + cx + ',' + (cy + mSize) + ' ' + (cx - mSize) + ',' + cy + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>\n');
+        } else if (shape === 't') {
+          svgStream.write('<polygon points="' + cx + ',' + (cy - mSize) + ' ' + (cx + mSize) + ',' + (cy + mSize * 0.7) + ' ' + (cx - mSize) + ',' + (cy + mSize * 0.7) + '" fill="' + color + '" stroke="white" stroke-width="0.7" opacity="0.85"/>\n');
+        }
+      }
+    }
 
-  const legendItems = [
-    [COL.walls, 'קירות'], [COL.doors, 'דלתות'], [COL.fireDoors, 'דלתות אש'],
-    [COL.stairs, 'מדרגות'], [COL.sprinklers, 'מתזים'], [COL.smokeDetectors, 'גלאי עשן'],
-    [COL.fireExtinguishers, 'מטפים'], [COL.hydrants, 'ברזי כיבוי'],
-    [COL.emergencyLights, 'תאורת חירום'], [COL.exitSigns, 'שלטי יציאה'],
-    [COL.fireWalls, 'קירות אש'], [COL.smokeVents, 'פתחי עשן']
-  ];
+    writeMarkers(classified.sprinklers, COL.sprinklers, 'c');
+    writeMarkers(classified.smokeDetectors, COL.smokeDetectors, 'r');
+    writeMarkers(classified.heatDetectors, COL.heatDetectors, 'r');
+    writeMarkers(classified.fireExtinguishers, COL.fireExtinguishers, 's');
+    writeMarkers(classified.hydrants, COL.hydrants, 's');
+    writeMarkers(classified.emergencyLights, COL.emergencyLights, 'd');
+    writeMarkers(classified.exitSigns, COL.exitSigns, 't');
+    writeMarkers(classified.smokeVents, COL.smokeVents, 'd');
 
-  const nc = 6, iw = (width - 40) / nc;
-  for (let idx = 0; idx < legendItems.length; idx++) {
-    const c2 = idx % nc, r2 = Math.floor(idx / nc);
-    const lx = 20 + c2 * iw, liy = ly + 30 + r2 * 20;
-    parts.push('<rect x="' + lx + '" y="' + liy + '" width="12" height="12" fill="' + legendItems[idx][0] + '" rx="2"/>');
-    parts.push('<text x="' + (lx + 18) + '" y="' + (liy + 10) + '" fill="#374151" font-size="10">' + legendItems[idx][1] + '</text>');
-  }
+    // Legend
+    const ly = imgH + 6;
+    svgStream.write('<rect x="4" y="' + ly + '" width="' + (width - 8) + '" height="' + (legH - 10) + '" fill="white" stroke="#e2e8f0" rx="4"/>\n');
+    svgStream.write('<text x="' + (width / 2) + '" y="' + (ly + 18) + '" text-anchor="middle" fill="#1e293b" font-size="12" font-weight="bold">מקרא - Legend</text>\n');
 
-  parts.push('</svg>');
+    const legendItems = [
+      [COL.walls, 'קירות'], [COL.doors, 'דלתות'], [COL.fireDoors, 'דלתות אש'],
+      [COL.stairs, 'מדרגות'], [COL.sprinklers, 'מתזים'], [COL.smokeDetectors, 'גלאי עשן'],
+      [COL.fireExtinguishers, 'מטפים'], [COL.hydrants, 'ברזי כיבוי'],
+      [COL.emergencyLights, 'תאורת חירום'], [COL.exitSigns, 'שלטי יציאה'],
+      [COL.fireWalls, 'קירות אש'], [COL.smokeVents, 'פתחי עשן']
+    ];
 
-  // Join once at the end
-  return parts.join('\n');
+    const nc = 6, iw = (width - 40) / nc;
+    for (let idx = 0; idx < legendItems.length; idx++) {
+      const c2 = idx % nc, r2 = Math.floor(idx / nc);
+      const lx = 20 + c2 * iw, liy = ly + 30 + r2 * 20;
+      svgStream.write('<rect x="' + lx + '" y="' + liy + '" width="12" height="12" fill="' + legendItems[idx][0] + '" rx="2"/>\n');
+      svgStream.write('<text x="' + (lx + 18) + '" y="' + (liy + 10) + '" fill="#374151" font-size="10">' + legendItems[idx][1] + '</text>\n');
+    }
+
+    svgStream.write('</svg>\n');
+    svgStream.end();
+  });
 }
 
 // ============ MAIN ============
 async function analyzeDXF(filePath) {
-  console.log('Vector DXF analysis v4 (optimized for 1M+ entities)...');
+  console.log('Vector DXF analysis v5 (ultra memory-optimized)...');
+  console.log('  Memory limits: ' + MAX_ENTITIES_AFTER_EXPANSION + ' entities max, ' + MAX_ENTITIES_FOR_SVG + ' for SVG');
 
-  // Use streaming parser
-  const parsed = await parseDXFStreaming(filePath);
+  // Parse with streaming
+  let parsed = await parseDXFStreaming(filePath);
   console.log('  Entities: ' + parsed.entities.length + ', Blocks: ' + parsed.blockCount + ', Layers: ' + Object.keys(parsed.layers).length);
 
   // Classify
-  const classified = classifyEntities(parsed);
+  let classified = classifyEntities(parsed);
   console.log('  Classified: ' + classified.stats.classified + '/' + classified.stats.total);
 
   // Analyze geometry
   const geometry = analyzeGeometry(classified);
 
-  // Check fire safety rules
+  // Check rules
   const analysis = checkFireSafetyRules(classified, geometry);
 
-  // Keep reference to entities for SVG rendering
-  const entitiesForRender = parsed.entities;
+  // Store counts before freeing
+  const entityCount = parsed.entities.length;
+  const blockCount = parsed.blockCount;
+  const layerCount = Object.keys(parsed.layers).length;
+  const layersCopy = { ...parsed.layers };
+  const vectorData = {
+    layers: Object.keys(classified.stats.byLayer),
+    entityTypes: { ...classified.stats.byType },
+    summary: {
+      walls: classified.walls.length,
+      doors: classified.doors.length,
+      fireDoors: classified.fireDoors.length,
+      stairs: classified.stairs.length,
+      exits: classified.exits.length,
+      sprinklers: classified.sprinklers.length,
+      smokeDetectors: classified.smokeDetectors.length,
+      fireExtinguishers: classified.fireExtinguishers.length,
+      hydrants: classified.hydrants.length,
+      emergencyLights: classified.emergencyLights.length,
+      exitSigns: classified.exitSigns.length,
+      smokeVents: classified.smokeVents.length,
+      fireWalls: classified.fireWalls.length,
+      texts: classified.texts.length
+    }
+  };
 
-  // Free raw data before heavy SVG rendering
-  parsed.raw = null;
+  // Render SVG to temp file
+  const tmpDir = os.tmpdir();
+  const svgPath = path.join(tmpDir, 'dxf_render_' + Date.now() + '.svg');
 
-  // Render SVG (downsampled if needed)
-  const svg = renderToSVG(entitiesForRender, classified, 4000);
-  console.log('  SVG generated: ' + (svg.length / 1024).toFixed(0) + 'KB');
+  await renderToSVGFile(parsed.entities, classified, 4000, svgPath);
+  console.log('  SVG written to: ' + svgPath);
 
-  // Convert to PNG
-  let pngBuffer = null;
-  try {
-    const sharp = require('sharp');
-    pngBuffer = await sharp(Buffer.from(svg)).png({ compressionLevel: 6 }).toBuffer();
-    console.log('  PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB');
-  } catch (e) {
-    console.log('  sharp unavailable: ' + e.message);
+  // Free entities immediately after SVG render
+  parsed.entities = null;
+  parsed.blocks = null;
+  parsed = null;
+
+  // Free classified arrays (keep only stats)
+  classified.walls = null;
+  classified.doors = null;
+  classified.fireDoors = null;
+  classified.windows = null;
+  classified.stairs = null;
+  classified.elevators = null;
+  classified.corridors = null;
+  classified.rooms = null;
+  classified.exits = null;
+  classified.sprinklers = null;
+  classified.smokeDetectors = null;
+  classified.heatDetectors = null;
+  classified.fireExtinguishers = null;
+  classified.hydrants = null;
+  classified.fireAlarmPanel = null;
+  classified.manualCallPoints = null;
+  classified.emergencyLights = null;
+  classified.exitSigns = null;
+  classified.smokeVents = null;
+  classified.fireWalls = null;
+  classified.accessRoads = null;
+  classified.texts = null;
+  classified.unknown = null;
+  classified = null;
+
+  // Hint to GC
+  if (global.gc) {
+    global.gc();
+    console.log('  Manual GC triggered');
   }
 
-  // Free entities after rendering
-  parsed.entities = null;
+  // Convert SVG file to PNG
+  let pngBuffer = null;
+  let svg = null;
+
+  try {
+    const sharp = require('sharp');
+    pngBuffer = await sharp(svgPath).png({ compressionLevel: 6 }).toBuffer();
+    console.log('  PNG: ' + (pngBuffer.length / 1024).toFixed(0) + 'KB');
+
+    // Read SVG for response (smaller than keeping in memory during render)
+    svg = fs.readFileSync(svgPath, 'utf8');
+    console.log('  SVG: ' + (svg.length / 1024).toFixed(0) + 'KB');
+  } catch (e) {
+    console.log('  sharp/svg error: ' + e.message);
+    // Try to read SVG anyway
+    try {
+      svg = fs.readFileSync(svgPath, 'utf8');
+    } catch (e2) {
+      svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text x="10" y="50">Error rendering</text></svg>';
+    }
+  }
+
+  // Clean up temp file
+  try {
+    fs.unlinkSync(svgPath);
+  } catch (e) {
+    // Ignore cleanup errors
+  }
 
   return {
     analysis: analysis,
     svg: svg,
     pngBuffer: pngBuffer,
     parsed: {
-      entityCount: entitiesForRender.length,
-      blockCount: parsed.blockCount,
-      layerCount: Object.keys(parsed.layers).length,
-      layers: parsed.layers
+      entityCount: entityCount,
+      blockCount: blockCount,
+      layerCount: layerCount,
+      layers: layersCopy
     },
-    vectorData: {
-      layers: Object.keys(classified.stats.byLayer),
-      entityTypes: classified.stats.byType,
-      summary: {
-        walls: classified.walls.length,
-        doors: classified.doors.length,
-        fireDoors: classified.fireDoors.length,
-        stairs: classified.stairs.length,
-        exits: classified.exits.length,
-        sprinklers: classified.sprinklers.length,
-        smokeDetectors: classified.smokeDetectors.length,
-        fireExtinguishers: classified.fireExtinguishers.length,
-        hydrants: classified.hydrants.length,
-        emergencyLights: classified.emergencyLights.length,
-        exitSigns: classified.exitSigns.length,
-        smokeVents: classified.smokeVents.length,
-        fireWalls: classified.fireWalls.length,
-        texts: classified.texts.length
-      }
-    }
+    vectorData: vectorData
   };
 }
 
@@ -974,5 +1025,5 @@ module.exports = {
   classifyEntities,
   analyzeGeometry,
   checkFireSafetyRules,
-  renderToSVG
+  renderToSVGFile
 };
