@@ -1,7 +1,8 @@
 /**
- * Fire Safety Checker - Railway Server v21
+ * Fire Safety Checker - Railway Server v22
  * DXF: Pure text analysis + RAW DIAGNOSTICS
- * DWG: PDF pipeline with extended timeouts for large files
+ * DWG: APS vector data extraction - NO IMAGES
+ * Both formats now use pure text analysis!
  */
 
 const express = require('express');
@@ -229,344 +230,324 @@ async function waitForTranslation(token, urn, maxWait = 900000) { // 15 minutes 
   throw new Error('Translation timeout - try a smaller file');
 }
 
-// ===== NEW PDF-BASED DWG PIPELINE =====
+// ===== APS VECTOR DATA EXTRACTION (NO IMAGES) =====
 
-const { execSync } = require('child_process');
-
-// Request PDF derivative from APS
-async function requestPDFDerivative(token, urn) {
-  console.log('Requesting PDF derivative from APS...');
+// Get metadata GUIDs from APS
+async function getAPSMetadataGUIDs(token, urn) {
+  console.log('Getting APS metadata GUIDs...');
   const resp = await fetch(
-    'https://developer.api.autodesk.com/modelderivative/v2/designdata/job',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'x-ads-force': 'true'
-      },
-      body: JSON.stringify({
-        input: { urn },
-        output: {
-          formats: [{ type: 'pdf' }]
-        }
-      })
-    }
+    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
   );
   const data = await resp.json();
-  console.log('PDF derivative request:', data.result || data.status || 'submitted');
+  console.log('Metadata response:', JSON.stringify(data, null, 2));
   return data;
 }
 
-// Wait for PDF derivative and get its URN
-async function waitForPDFDerivative(token, urn, maxWait = 300000) {
-  console.log('Waiting for PDF derivative...');
-  const start = Date.now();
-
-  while (Date.now() - start < maxWait) {
-    const resp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    const manifest = await resp.json();
-
-    // Log all available derivatives for debugging
-    console.log('Available derivatives:', JSON.stringify(manifest.derivatives?.map(d => ({
-      outputType: d.outputType,
-      status: d.status,
-      children: d.children?.slice(0, 5).map(c => ({ role: c.role, mime: c.mime, urn: c.urn?.substring(0, 50) }))
-    })), null, 2));
-
-    // Look for PDF in derivatives
-    for (const deriv of manifest.derivatives || []) {
-      if (deriv.outputType === 'pdf' && deriv.status === 'success') {
-        // Find the PDF file in children
-        const pdfChild = deriv.children?.find(c => c.mime === 'application/pdf' || c.role === 'pdf');
-        if (pdfChild?.urn) {
-          console.log('PDF derivative ready:', pdfChild.urn.substring(0, 50));
-          return pdfChild.urn;
-        }
-      }
-    }
-
-    // Check if still processing
-    const pdfDeriv = manifest.derivatives?.find(d => d.outputType === 'pdf');
-    if (pdfDeriv) {
-      console.log(`PDF status: ${pdfDeriv.status} (${pdfDeriv.progress || 'unknown'}%)`);
-      if (pdfDeriv.status === 'failed') {
-        console.log('PDF derivative failed, falling back to image pipeline');
-        return null;
-      }
-    }
-
-    await new Promise(r => setTimeout(r, 5000));
-  }
-
-  console.log('PDF derivative timeout, falling back to image pipeline');
-  return null;
-}
-
-// Download a derivative from APS
-async function downloadDerivative(token, urn, derivativeUrn) {
-  const encodedUrn = encodeURIComponent(derivativeUrn);
+// Get ALL properties of ALL objects from APS
+async function getAPSProperties(token, urn, guid) {
+  console.log(`Extracting properties for GUID: ${guid}...`);
   const resp = await fetch(
-    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/derivatives/${encodedUrn}`,
+    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}/properties?forceget=true`,
     { headers: { 'Authorization': `Bearer ${token}` } }
   );
-  if (!resp.ok) throw new Error(`Failed to download derivative: ${resp.status}`);
-  return Buffer.from(await resp.arrayBuffer());
-}
 
-// Convert PDF to high-res PNGs using pdftoppm
-async function convertPDFToPNGs(pdfPath, outputDir) {
-  const outputPrefix = path.join(outputDir, 'page');
-  console.log(`Converting PDF to PNG at 300 DPI...`);
-
-  try {
-    // pdftoppm creates page-1.png, page-2.png, etc.
-    execSync(`pdftoppm -png -r 300 "${pdfPath}" "${outputPrefix}"`, {
-      timeout: 180000,
-      maxBuffer: 100 * 1024 * 1024
-    });
-
-    // Find all generated PNG files
-    const files = fs.readdirSync(outputDir)
-      .filter(f => f.startsWith('page-') && f.endsWith('.png'))
-      .sort();
-
-    console.log(`Generated ${files.length} PNG pages`);
-    return files.map(f => path.join(outputDir, f));
-  } catch (e) {
-    console.error('PDF conversion error:', e.message);
-    throw new Error('Failed to convert PDF to PNG');
+  if (!resp.ok) {
+    console.log(`Properties request failed: ${resp.status}`);
+    return null;
   }
+
+  const data = await resp.json();
+  console.log(`Properties: ${data.data?.collection?.length || 0} objects extracted`);
+  return data;
 }
 
-// Split a PNG into zones
-async function splitIntoZones(pngPath, cols = 3, rows = 2) {
-  const sharp = require('sharp');
-  const fullBuffer = fs.readFileSync(pngPath);
-  const metadata = await sharp(fullBuffer).metadata();
+// Get object tree from APS
+async function getAPSObjectTree(token, urn, guid) {
+  console.log(`Extracting object tree for GUID: ${guid}...`);
+  const resp = await fetch(
+    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}?forceget=true`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
 
-  console.log(`  Page size: ${metadata.width}x${metadata.height}`);
+  if (!resp.ok) {
+    console.log(`Object tree request failed: ${resp.status}`);
+    return null;
+  }
 
-  const zoneW = Math.floor(metadata.width / cols);
-  const zoneH = Math.floor(metadata.height / rows);
-  const zones = [];
+  const data = await resp.json();
+  return data;
+}
 
-  const zoneLabels = [
-    ['עליון שמאלי', 'עליון אמצעי', 'עליון ימני'],
-    ['תחתון שמאלי', 'תחתון אמצעי', 'תחתון ימני']
-  ];
+// Build structured summary from APS extracted data
+function buildAPSVectorSummary(propertiesData, treeData) {
+  const objects = propertiesData?.data?.collection || [];
 
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const left = c * zoneW;
-      const top = r * zoneH;
-      const width = Math.min(zoneW, metadata.width - left);
-      const height = Math.min(zoneH, metadata.height - top);
+  const layers = new Set();
+  const texts = [];
+  const blocks = [];
+  const dimensions = [];
+  const allPropertyKeys = new Set();
 
-      const zoneBuffer = await sharp(fullBuffer)
-        .extract({ left, top, width, height })
-        .resize(4000, 4000, { fit: 'inside', withoutEnlargement: true })
-        .sharpen({ sigma: 1.0 })
-        .png()
-        .toBuffer();
+  // Fire safety keyword patterns
+  const fireKeywords = {
+    'ספרינקלר': /ספרינק|מתז|SPRINK|SPR/i,
+    'גלאי עשן': /גלאי.?עשן|עשן|SMOKE|SD/i,
+    'גלאי חום': /גלאי.?חום|חום|HEAT|HD/i,
+    'מטף': /מטף|מטפה|EXTING|FE/i,
+    'הידרנט': /הידרנט|ברז.?כיבוי|HYDRANT|FH|IH/i,
+    'יציאה': /יציאה|מוצא|EXIT/i,
+    'מדרגות': /מדרגות|STAIR/i,
+    'דלת אש': /דלת.?אש|FIRE.?DOOR|FD/i,
+    'חירום': /חירום|EMERGENCY/i,
+    'קיר אש': /קיר.?אש|FIRE.?WALL/i,
+  };
+  const fireMatches = {};
 
-      zones.push({
-        buffer: zoneBuffer,
-        label: zoneLabels[r]?.[c] || `אזור ${r * cols + c + 1}`
+  objects.forEach(obj => {
+    const props = obj.properties || {};
+    const name = obj.name || '';
+
+    // Collect all property keys
+    Object.keys(props).forEach(key => allPropertyKeys.add(key));
+
+    // Extract layer info
+    const layer = props.Layer || props['Layer Name'] || props.layer || '';
+    if (layer) layers.add(layer);
+
+    // Extract text content (multiple possible property names)
+    const textValue = props['Text Value'] || props['Contents'] || props['Text String'] ||
+                      props['TextString'] || props['Text'] || props['String'] || '';
+    if (textValue && textValue.length > 0) {
+      texts.push({
+        text: textValue,
+        layer: layer,
+        name: name,
+        position: props.Position || props.Location || ''
+      });
+
+      // Check for fire safety keywords
+      Object.entries(fireKeywords).forEach(([keyword, pattern]) => {
+        if (pattern.test(textValue) || pattern.test(name)) {
+          if (!fireMatches[keyword]) fireMatches[keyword] = [];
+          fireMatches[keyword].push(textValue || name);
+        }
       });
     }
-  }
 
-  // Also create a resized full page for overview
-  const fullResized = await sharp(fullBuffer)
-    .resize(4000, 4000, { fit: 'inside', withoutEnlargement: true })
-    .png()
-    .toBuffer();
+    // Extract block/component names
+    const blockName = props['Block Name'] || props['Component Name'] || props['BlockName'] || '';
+    if (blockName || (name && name !== 'Model')) {
+      blocks.push({
+        name: blockName || name,
+        layer: layer,
+        type: obj.objectType || props.Type || ''
+      });
 
-  return { fullPage: fullResized, zones, dimensions: `${metadata.width}x${metadata.height}` };
+      // Check blocks for fire keywords
+      Object.entries(fireKeywords).forEach(([keyword, pattern]) => {
+        if (pattern.test(blockName) || pattern.test(name)) {
+          if (!fireMatches[keyword]) fireMatches[keyword] = [];
+          fireMatches[keyword].push(blockName || name);
+        }
+      });
+    }
+
+    // Extract dimensions/measurements
+    const measurement = props.Measurement || props.Value || props.Length ||
+                        props.Width || props.Height || props.Area || '';
+    if (measurement) {
+      dimensions.push({ value: measurement, layer: layer, name: name });
+    }
+  });
+
+  // Count block occurrences
+  const blockCounts = {};
+  blocks.forEach(b => {
+    const key = b.name;
+    blockCounts[key] = (blockCounts[key] || 0) + 1;
+  });
+
+  // Build summary text
+  let summary = `
+=== APS EXTRACTED VECTOR DATA FROM DWG ===
+
+TOTAL OBJECTS EXTRACTED: ${objects.length}
+
+LAYERS (${layers.size}):
+${[...layers].join(', ') || 'No layer information extracted'}
+
+=== ALL TEXT CONTENT (${texts.length} items) ===
+${texts.length === 0 ? 'No text entities found in extracted data.\n' :
+  texts.map((t, i) => `${i + 1}. "${t.text}" [layer: ${t.layer || 'unknown'}]${t.position ? ` at ${t.position}` : ''}`).join('\n')}
+
+=== BLOCK/COMPONENT REFERENCES (${Object.keys(blockCounts).length} unique) ===
+${Object.entries(blockCounts)
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, 50)
+  .map(([name, count]) => `- "${name}": ${count} instances`)
+  .join('\n') || 'No blocks found'}
+
+=== DIMENSIONS/MEASUREMENTS (${dimensions.length} items) ===
+${dimensions.slice(0, 30).map(d => `- ${d.value} [${d.layer || 'unknown'}] ${d.name || ''}`).join('\n') || 'No dimensions found'}
+
+=== FIRE SAFETY KEYWORDS DETECTED ===
+${Object.entries(fireMatches).length === 0 ? 'No fire safety keywords detected in extracted data.\n' :
+  Object.entries(fireMatches).map(([keyword, matches]) =>
+    `${keyword}: ${matches.length} matches\n  Examples: ${[...new Set(matches)].slice(0, 5).join(', ')}`
+  ).join('\n')}
+
+=== AVAILABLE PROPERTY TYPES ===
+${[...allPropertyKeys].slice(0, 50).join(', ')}
+
+=== SAMPLE OBJECTS (first 30 with details) ===
+${objects.slice(0, 30).map(obj => {
+  const props = obj.properties || {};
+  const relevantProps = {};
+  ['Layer', 'Text Value', 'Contents', 'Block Name', 'Type', 'Name', 'Measurement', 'Length', 'Width', 'Height', 'Area']
+    .forEach(k => { if (props[k]) relevantProps[k] = props[k]; });
+  return `- ${obj.name || 'unnamed'}: ${JSON.stringify(relevantProps)}`;
+}).join('\n')}
+`;
+
+  return summary;
 }
 
-// Main function: Get high-res images via PDF pipeline
-async function getHighResolutionImages(token, urn) {
-  const sharp = require('sharp');
+// Main function: Extract vector data from APS (NO IMAGES)
+async function extractAPSVectorData(token, urn) {
+  console.log('Extracting vector data from APS (no images)...');
 
-  // Step 1: Request PDF derivative
-  await requestPDFDerivative(token, urn);
+  // Step 1: Get metadata GUIDs
+  const metaData = await getAPSMetadataGUIDs(token, urn);
+  const viewables = metaData.data?.metadata || [];
 
-  // Step 2: Wait for PDF derivative
-  const pdfUrn = await waitForPDFDerivative(token, urn);
-
-  if (pdfUrn) {
-    // Step 3: Download PDF
-    console.log('Downloading PDF derivative...');
-    const pdfBuffer = await downloadDerivative(token, urn, pdfUrn);
-    console.log(`Downloaded PDF: ${(pdfBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-
-    // Step 4: Save PDF to temp file
-    const pdfId = uuidv4();
-    const pdfDir = path.join(tmpDir, `pdf_${pdfId}`);
-    fs.mkdirSync(pdfDir, { recursive: true });
-    const pdfPath = path.join(pdfDir, 'drawing.pdf');
-    fs.writeFileSync(pdfPath, pdfBuffer);
-
-    // Step 5: Convert PDF to PNGs
-    const pngPaths = await convertPDFToPNGs(pdfPath, pdfDir);
-
-    if (pngPaths.length === 0) {
-      throw new Error('No PNG pages generated from PDF');
-    }
-
-    // Step 6: Process first page (or all pages for multi-page)
-    // For now, process just the first page
-    console.log(`Processing page 1 of ${pngPaths.length}...`);
-    const { fullPage, zones, dimensions } = await splitIntoZones(pngPaths[0]);
-
-    // Cleanup temp files
-    try {
-      fs.rmSync(pdfDir, { recursive: true, force: true });
-    } catch (e) {
-      console.log('Cleanup warning:', e.message);
-    }
-
-    return {
-      fullImage: fullPage,
-      zones,
-      sourceType: 'pdf-derivative',
-      sourceDimensions: dimensions,
-      outputDimensions: '4000x4000 (max)',
-      pageCount: pngPaths.length
-    };
+  if (viewables.length === 0) {
+    throw new Error('No viewable metadata found in APS translation');
   }
 
-  // FALLBACK: Use thumbnail/image derivatives if PDF not available
-  console.log('PDF not available, falling back to image derivatives...');
+  console.log(`Found ${viewables.length} viewables:`, viewables.map(v => ({ name: v.name, guid: v.guid, role: v.role })));
 
-  const manifestResp = await fetch(
-    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-  const manifest = await manifestResp.json();
+  // Prefer 2D views, fall back to first available
+  const view2D = viewables.find(v => v.role === '2d' || v.name?.includes('2D') || v.name?.includes('Model'));
+  const selectedView = view2D || viewables[0];
+  const guid = selectedView.guid;
 
-  const derivatives = manifest.derivatives || [];
-  const allImages = [];
+  console.log(`Selected view: ${selectedView.name} (${guid})`);
 
-  function findImages(children, parentName = '') {
-    for (const child of children || []) {
-      const name = child.name || parentName;
-      if (child.urn && (child.mime?.startsWith('image/') || child.role === 'graphics' || child.role === 'thumbnail')) {
-        allImages.push({ urn: child.urn, name: name || 'Image', mime: child.mime, role: child.role });
-      }
-      if (child.children) findImages(child.children, name);
-    }
-  }
+  // Step 2: Get all properties
+  const propertiesData = await getAPSProperties(token, urn, guid);
 
-  for (const deriv of derivatives) findImages(deriv.children, deriv.name);
-  console.log(`Found ${allImages.length} image derivatives`);
+  // Step 3: Get object tree
+  const treeData = await getAPSObjectTree(token, urn, guid);
 
-  let bestImage = null;
-  for (const img of allImages) {
-    try {
-      const derivResp = await fetch(
-        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/derivatives/${encodeURIComponent(img.urn)}`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-      if (derivResp.ok) {
-        const buffer = Buffer.from(await derivResp.arrayBuffer());
-        if (!bestImage || buffer.length > bestImage.buffer.length) {
-          bestImage = { buffer, name: img.name };
-          console.log('Downloaded derivative:', img.name, buffer.length, 'bytes');
-        }
-      }
-    } catch (e) {
-      console.log('Derivative download failed:', img.name);
-    }
-  }
+  // Step 4: Build summary
+  const vectorSummary = buildAPSVectorSummary(propertiesData, treeData);
 
-  // Try thumbnail as last resort
-  if (!bestImage) {
-    const resp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/thumbnail?width=400&height=400`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    if (resp.ok) {
-      bestImage = { buffer: Buffer.from(await resp.arrayBuffer()), name: 'thumbnail' };
-    }
-  }
-
-  if (!bestImage) {
-    throw new Error('No images available from APS');
-  }
-
-  // Process the fallback image
-  const sourceMeta = await sharp(bestImage.buffer).metadata();
-  console.log(`Fallback image: ${sourceMeta.width}x${sourceMeta.height}`);
-
-  const fullImage = await sharp(bestImage.buffer)
-    .resize(4000, 4000, { fit: 'inside', withoutEnlargement: true })
-    .sharpen({ sigma: 1.5 })
-    .png()
-    .toBuffer();
-
-  // Split into 3x3 grid
-  const zones = [];
-  const imgMeta = await sharp(fullImage).metadata();
-  const w = imgMeta.width || 2048;
-  const h = imgMeta.height || 2048;
-  const zoneW = Math.floor(w / 3);
-  const zoneH = Math.floor(h / 3);
-
-  const zoneLabels = [
-    ['עליון שמאלי', 'עליון אמצעי', 'עליון ימני'],
-    ['אמצעי שמאלי', 'מרכז', 'אמצעי ימני'],
-    ['תחתון שמאלי', 'תחתון אמצעי', 'תחתון ימני']
-  ];
-
-  for (let row = 0; row < 3; row++) {
-    for (let col = 0; col < 3; col++) {
-      try {
-        const zoneBuffer = await sharp(fullImage)
-          .extract({ left: col * zoneW, top: row * zoneH, width: Math.min(zoneW, w - col * zoneW), height: Math.min(zoneH, h - row * zoneH) })
-          .sharpen({ sigma: 1.0 })
-          .png()
-          .toBuffer();
-        zones.push({ buffer: zoneBuffer, label: zoneLabels[row][col] });
-      } catch (e) {
-        console.log(`Failed to extract zone ${row},${col}:`, e.message);
-      }
-    }
-  }
+  console.log(`Vector summary: ${vectorSummary.length} characters`);
 
   return {
-    fullImage,
-    zones,
-    sourceType: 'image-fallback',
-    sourceDimensions: `${sourceMeta.width}x${sourceMeta.height}`,
-    outputDimensions: `${imgMeta.width}x${imgMeta.height}`
+    vectorSummary,
+    objectCount: propertiesData?.data?.collection?.length || 0,
+    viewName: selectedView.name,
+    guid
   };
 }
 
-async function analyzeWithAI(imageBuffers, analysisPrompt) {
-  const content = [
-    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBuffers.fullImage.toString('base64') } },
-    { type: 'text', text: 'זוהי התוכנית המלאה.' }
-  ];
-  for (const zone of imageBuffers.zones) {
-    content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: zone.buffer.toString('base64') } });
-    content.push({ type: 'text', text: `פרט: ${zone.label}` });
-  }
-  content.push({ type: 'text', text: analysisPrompt });
+// Analyze DWG vector data with Claude (TEXT ONLY - NO IMAGES)
+async function analyzeDWGVectorData(vectorSummary) {
+  console.log('  Sending DWG vector data to Claude (text mode)...');
+
+  const prompt = `אתה מהנדס בטיחות אש ישראלי המנתח נתוני וקטור שחולצו מקובץ DWG אדריכלי.
+
+${vectorSummary}
+
+בצע בדיקת תאימות מלאה לבטיחות אש בהתאם לתקנות הישראליות:
+- תקנות הבטיחות באש
+- הוראות נציב כבאות 536, 550
+- TI-1220 (מערכות גילוי אש)
+- TI-1596 (מערכות ספרינקלרים)
+
+נתח את כל התוויות, שמות הבלוקים, השכבות והמידות כדי לזהות אלמנטים של בטיחות אש.
+
+קטגוריות לבדיקה:
+1. דרכי גישה לכבאות
+2. דרכי מילוט ויציאות
+3. מערכת גילוי אש (גלאי עשן, גלאי חום)
+4. מערכת ספרינקלרים
+5. ציוד כיבוי ידני (מטפים, הידרנטים)
+6. הפרדות אש (קירות אש, דלתות אש)
+7. תאורת חירום ושילוט
+8. שליטה בעשן
+9. מערכות צנרת אש
+10. תיעוד ותכנון
+
+החזר JSON בפורמט הבא:
+\`\`\`json
+{
+  "buildingType": "תיאור סוג המבנה בעברית",
+  "overallScore": 0-100,
+  "overallStatus": "עובר/נכשל/דורש_בדיקה",
+  "identifiedElements": {
+    "sprinklers": { "count": 0, "coverage": "תיאור" },
+    "smokeDetectors": { "count": 0 },
+    "fireExtinguishers": { "count": 0 },
+    "hydrants": { "count": 0 },
+    "exits": { "count": 0, "locations": [] },
+    "fireDoors": { "count": 0 },
+    "stairs": { "count": 0 },
+    "rooms": { "count": 0 }
+  },
+  "categories": [
+    {"id": 1, "name": "דרכי גישה לכבאות", "nameHe": "דרכי גישה לכבאות", "status": "עובר/נכשל/דורש_בדיקה", "score": 0-100, "findings": ["ממצא"], "recommendations": ["המלצה"]},
+    {"id": 2, "name": "דרכי מילוט ויציאות", "nameHe": "דרכי מילוט ויציאות", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 3, "name": "מערכת גילוי אש", "nameHe": "מערכת גילוי אש", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 4, "name": "מערכת ספרינקלרים", "nameHe": "מערכת ספרינקלרים", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 5, "name": "ציוד כיבוי ידני", "nameHe": "ציוד כיבוי ידני", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 6, "name": "הפרדות אש", "nameHe": "הפרדות אש", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 7, "name": "תאורת חירום ושילוט", "nameHe": "תאורת חירום ושילוט", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 8, "name": "שליטה בעשן", "nameHe": "שליטה בעשן", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 9, "name": "מערכות צנרת אש", "nameHe": "מערכות צנרת אש", "status": "...", "score": 0-100, "findings": [], "recommendations": []},
+    {"id": 10, "name": "תיעוד ותכנון", "nameHe": "תיעוד ותכנון", "status": "...", "score": 0-100, "findings": [], "recommendations": []}
+  ],
+  "criticalIssues": ["בעיה קריטית בעברית"],
+  "summary": "סיכום מפורט בעברית",
+  "summaryHe": "סיכום מפורט בעברית"
+}
+\`\`\`
+
+חשוב: כל הטקסט בעברית!`;
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-5-20250929', max_tokens: 8000, messages: [{ role: 'user', content }] })
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 8000,
+      messages: [{ role: 'user', content: prompt }]
+    })
   });
+
   const data = await resp.json();
-  if (data.error) throw new Error(`AI Error: ${JSON.stringify(data.error)}`);
-  return data.content[0].text;
+  if (data.error) throw new Error(`Claude API Error: ${JSON.stringify(data.error)}`);
+
+  const rawText = data.content[0].text;
+  console.log('  Claude response received. Parsing JSON...');
+
+  // Parse analysis JSON
+  let analysis;
+  try {
+    const jsonMatch = rawText.match(/```json\n?([\s\S]*?)\n?```/) || rawText.match(/\{[\s\S]*"categories"[\s\S]*\}/);
+    analysis = JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : rawText);
+  } catch (e) {
+    console.log('  Warning: Could not parse JSON, returning raw text');
+    analysis = { rawText, parseError: true };
+  }
+
+  return analysis;
 }
 
 // ===== Prompts =====
@@ -776,7 +757,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '21.0.0-railway'
+    version: '22.0.0-railway'
   });
 });
 
@@ -904,47 +885,23 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       });
     }
 
-    // ===== DWG FILES: Use APS + Claude Vision pipeline =====
-    console.log('DWG file detected - using APS + Claude Vision');
+    // ===== DWG FILES: APS Vector Data Extraction (NO IMAGES) =====
+    console.log('DWG file detected - using APS vector data extraction (no images)');
 
-    // Get analysis prompt
-    let analysisPrompt;
-    if (req.body.customInstructions) {
-      console.log('Using custom instructions from client');
-      analysisPrompt = buildCustomPrompt(req.body.customInstructions, 'הנחיות מותאמות');
-    } else {
-      const instructionId = req.body.instructionId || 'fire-safety';
-      analysisPrompt = getInstructionPrompt(instructionId);
-    }
-
+    // Step 1: Upload and translate with APS
     const token = await getAPSToken();
     const bucketKey = await ensureBucket(token);
     const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
     await translateToSVF2(token, urn);
     await waitForTranslation(token, urn);
 
-    const images = await getHighResolutionImages(token, urn);
+    // Step 2: Extract vector data (properties, layers, text, blocks)
+    const vectorResult = await extractAPSVectorData(token, urn);
 
-    // Save images locally
-    const imageId = uuidv4();
-    const mainImagePath = path.join(imagesDir, `${imageId}.png`);
-    fs.writeFileSync(mainImagePath, images.fullImage);
-    const imageUrl = `/images/${imageId}.png`;
+    console.log(`  Extracted ${vectorResult.objectCount} objects from view: ${vectorResult.viewName}`);
 
-    const zoneUrls = [];
-    for (let i = 0; i < images.zones.length; i++) {
-      const zonePath = path.join(imagesDir, `${imageId}_zone${i}.png`);
-      fs.writeFileSync(zonePath, images.zones[i].buffer);
-      zoneUrls.push({ url: `/images/${imageId}_zone${i}.png`, label: images.zones[i].label });
-    }
-
-    const rawAnalysis = await analyzeWithAI(images, analysisPrompt);
-
-    let analysis;
-    try {
-      const jsonMatch = rawAnalysis.match(/```json\n?([\s\S]*?)\n?```/) || rawAnalysis.match(/\{[\s\S]*"categories"[\s\S]*\}/);
-      analysis = JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : rawAnalysis);
-    } catch (e) { analysis = { rawText: rawAnalysis, parseError: true }; }
+    // Step 3: Send vector data to Claude (TEXT ONLY)
+    const analysis = await analyzeDWGVectorData(vectorResult.vectorSummary);
 
     // Cleanup
     try { fs.unlinkSync(req.file.path); } catch(e) {}
@@ -955,12 +912,14 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       success: true,
       filename: originalName,
       analysis,
-      analysisMethod: 'vision',
-      imageUrl,
-      zoneUrls,
-      sourceType: images.sourceType,
-      sourceDimensions: images.sourceDimensions,
-      outputDimensions: images.outputDimensions,
+      analysisMethod: 'vector-aps',
+      vectorData: {
+        objectCount: vectorResult.objectCount,
+        viewName: vectorResult.viewName,
+        guid: vectorResult.guid
+      },
+      // No imageUrl or zoneUrls - pure vector analysis
+      sourceType: 'aps-properties',
       processingTime: `${((Date.now() - startTime) / 1000).toFixed(1)}s`
     });
   } catch (e) {
@@ -987,7 +946,7 @@ const server = app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 21.0.0-railway`);
+  console.log(`   Version: 22.0.0-railway`);
   console.log(`   Timeouts: 25min server, 20min analysis, 15min translation`);
 });
 
