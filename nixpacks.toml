@@ -1,5 +1,5 @@
 # Nixpacks configuration for Railway
-# Install system dependencies for sharp and PDF processing
+# No system dependencies needed for DXF-only mode
 
 [phases.setup]
-aptPkgs = ["fontconfig", "libfontconfig1", "poppler-utils"]
+aptPkgs = []

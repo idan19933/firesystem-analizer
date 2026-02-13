@@ -179,6 +179,18 @@
       color: var(--text-muted);
       font-weight: 500;
     }
+    .format-tag.highlight {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      border-color: var(--primary);
+      color: white;
+      font-weight: 700;
+    }
+    .upload-hint {
+      margin-top: 12px;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      font-family: 'Courier New', monospace;
+    }
     .upload-area input { display: none; }
 
     /* Progress Section */
@@ -922,17 +934,16 @@
     <!-- Upload Area -->
     <section class="upload-area" id="uploadArea">
       <div class="upload-content">
-        <div class="upload-icon">📁</div>
-        <h3>גרור קובץ תוכנית לכאן</h3>
-        <p>או לחץ לבחירת קובץ</p>
+        <div class="upload-icon">📐</div>
+        <h3>גרור קובץ DXF לכאן</h3>
+        <p>ייצא DXF מ-AutoCAD (כל השכבות דולקות)</p>
         <div class="upload-formats">
-          <span class="format-tag">DWG</span>
-          <span class="format-tag">DXF</span>
-          <span class="format-tag">DWF</span>
+          <span class="format-tag highlight">DXF</span>
           <span class="format-tag">ZIP</span>
         </div>
+        <p class="upload-hint">File > Save As > DXF</p>
       </div>
-      <input type="file" id="fileInput" accept=".dwg,.dxf,.dwf,.zip">
+      <input type="file" id="fileInput" accept=".dxf,.zip">
     </section>
 
     <!-- Progress -->
@@ -1243,7 +1254,7 @@
     async function handleFile(file) {
       const ext = file.name.split('.').pop().toLowerCase();
       if (!['dwg', 'dxf', 'dwf', 'zip'].includes(ext)) {
-        alert('נא להעלות קובץ DWG, DXF, DWF או ZIP בלבד');
+        alert('נא להעלות קובץ DXF או ZIP בלבד. ייצא DXF מ-AutoCAD.');
         return;
       }
 
@@ -1279,7 +1290,7 @@
       }
 
       const formData = new FormData();
-      formData.append('dwgFile', file);
+      formData.append('file', file);
       formData.append('instructionId', currentInstructionId || 'fire-safety');
       if (tempInstructionContent) {
         formData.append('customInstructions', tempInstructionContent);

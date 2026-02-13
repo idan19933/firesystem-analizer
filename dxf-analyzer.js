@@ -1,116 +1,16 @@
-// dxf-analyzer.js v12 - PURE TEXT EXTRACTION + RAW DIAGNOSTICS
-// NO IMAGES. NO SVG. NO PNG. NO SHARP.
-// Parses ALL entities, stores only important ones, counts the rest.
+// dxf-analyzer.js v13 - COMPLETE FIRE SAFETY ANALYSIS PIPELINE
+// Parses DXF, builds object tree, classifies fire safety elements, measures distances
 
 const fs = require('fs');
 const readline = require('readline');
 
-// ============ RAW FILE DIAGNOSTICS ============
-function runRawDiagnostics(filePath) {
-  console.log('\n=== RAW FILE DIAGNOSTICS ===');
-
-  const stats = fs.statSync(filePath);
-  console.log(`  File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-
-  // Read raw file content
-  console.log('  Reading raw file for diagnostics...');
-  const rawContent = fs.readFileSync(filePath, 'utf8');
-  console.log(`  Raw content length: ${rawContent.length} characters`);
-
-  // Count entity types by searching for the DXF markers
-  // In DXF format: code 0 on one line, then entity type on next line
-  const entityMarkers = ['TEXT', 'MTEXT', 'ARC', 'CIRCLE', 'INSERT', 'DIMENSION', 'HATCH', 'SPLINE', 'ATTRIB', 'ATTDEF', 'LINE', 'LWPOLYLINE', 'POLYLINE'];
-  console.log('  Scanning for entity type markers...');
-
-  entityMarkers.forEach(marker => {
-    // DXF format: \n0\nENTITY_TYPE\n or with spaces/tabs
-    const regex = new RegExp(`\\n\\s*0\\s*\\n\\s*${marker}\\s*\\n`, 'gi');
-    const matches = rawContent.match(regex) || [];
-    if (matches.length > 0) {
-      console.log(`  RAW SCAN: Found ${matches.length} ${marker} entities`);
-    }
-  });
-
-  // Also try alternate pattern (some DXF files have different formatting)
-  console.log('  Trying alternate entity patterns...');
-  entityMarkers.forEach(marker => {
-    // Just count occurrences of the entity name after a 0
-    const regex = new RegExp(`^\\s*0\\s*$[\\s\\S]*?^\\s*${marker}\\s*$`, 'gim');
-    const matches = rawContent.match(regex) || [];
-    if (matches.length > 0) {
-      console.log(`  RAW SCAN ALT: Found ${matches.length} ${marker} patterns`);
-    }
-  });
-
-  // Search for Hebrew text content anywhere in the file
-  const hebrewRegex = /[\u0590-\u05FF]+/g;
-  const hebrewMatches = rawContent.match(hebrewRegex) || [];
-  console.log(`  RAW SCAN: Found ${hebrewMatches.length} Hebrew text fragments`);
-  if (hebrewMatches.length > 0) {
-    const uniqueHebrew = [...new Set(hebrewMatches)].slice(0, 20);
-    console.log(`  RAW SCAN: First 20 unique Hebrew texts:`, uniqueHebrew);
-  }
-
-  // Search for common fire safety terms
-  const fireTerms = ['EXIT', 'FIRE', 'SD', 'SPR', 'FE', 'FD', 'אש', 'יציאה', 'מטף', 'גלאי', 'ספרינקלר', 'מדרגות', 'חירום'];
-  console.log('  Searching for fire safety terms...');
-  fireTerms.forEach(term => {
-    const regex = new RegExp(term, 'gi');
-    const matches = rawContent.match(regex) || [];
-    if (matches.length > 0) {
-      console.log(`  RAW SCAN: "${term}" appears ${matches.length} times`);
-    }
-  });
-
-  // Check for code 1 (text content marker in DXF)
-  const code1Pattern = /\n\s*1\s*\n([^\n]+)/g;
-  const code1Matches = [];
-  let match;
-  while ((match = code1Pattern.exec(rawContent)) !== null && code1Matches.length < 50) {
-    const text = match[1].trim();
-    if (text.length > 0 && text.length < 200) {
-      code1Matches.push(text);
-    }
-  }
-  console.log(`  RAW SCAN: Found ${code1Matches.length} code-1 text values (first 50)`);
-  if (code1Matches.length > 0) {
-    console.log(`  RAW SCAN: Sample texts:`, code1Matches.slice(0, 20));
-  }
-
-  // Check encoding - look for high bytes
-  const binaryContent = fs.readFileSync(filePath, 'latin1');
-  const highBytes = binaryContent.match(/[\x80-\xFF]/g) || [];
-  console.log(`  RAW SCAN: High bytes (non-ASCII): ${highBytes.length}`);
-
-  // Check for ENTITIES section
-  const entitiesSectionMatch = rawContent.match(/\n\s*0\s*\nSECTION\s*\n\s*2\s*\nENTITIES/i);
-  console.log(`  RAW SCAN: ENTITIES section found: ${entitiesSectionMatch ? 'YES' : 'NO'}`);
-
-  // Check for BLOCKS section
-  const blocksSectionMatch = rawContent.match(/\n\s*0\s*\nSECTION\s*\n\s*2\s*\nBLOCKS/i);
-  console.log(`  RAW SCAN: BLOCKS section found: ${blocksSectionMatch ? 'YES' : 'NO'}`);
-
-  // Count total lines
-  const lineCount = rawContent.split('\n').length;
-  console.log(`  RAW SCAN: Total lines in file: ${lineCount}`);
-
-  console.log('=== END RAW DIAGNOSTICS ===\n');
-
-  return {
-    fileSize: stats.size,
-    charCount: rawContent.length,
-    lineCount,
-    hebrewCount: hebrewMatches.length,
-    highByteCount: highBytes.length,
-    code1Count: code1Matches.length,
-    sampleTexts: code1Matches.slice(0, 20)
-  };
-}
-
-// ============ STREAMING PARSER - PARSES ALL ENTITIES ============
-async function parseDXFStreaming(filePath) {
+// ============ STREAMING PARSER ============
+async function streamParseDXF(filePath) {
   return new Promise((resolve, reject) => {
-    console.log('  DXF Parser v12 - Full parse, no truncation...');
+    console.log('  DXF Parser v13 - Full streaming parse...');
+
+    const stats = fs.statSync(filePath);
+    console.log(`  File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
 
     const fileStream = fs.createReadStream(filePath, {
       encoding: 'utf8',
@@ -125,22 +25,21 @@ async function parseDXFStreaming(filePath) {
     let currentSection = null;
     let inBlock = false;
     let currentBlockName = null;
+    let currentBlockEntities = [];
 
     const blocks = {};
     const layers = {};
 
-    // CRITICAL: Store ALL texts and circles, sample arcs, count everything else
-    const texts = [];       // Store ALL - CRITICAL for analysis
-    const circles = [];     // Store ALL - potential symbols
-    const arcSamples = [];  // Store samples for door detection
-    const blockRefs = [];   // Store ALL block references
+    // Store ALL important entities
+    const texts = [];
+    const circles = [];
+    const arcs = [];
+    const lines = [];
+    const polylines = [];
+    const blockRefs = [];
+    const dimensions = [];
+    const hatches = [];
 
-    // Just count these - don't store coordinates
-    let lineCount = 0;
-    let arcCount = 0;
-    let polylineCount = 0;
-    let closedPolyCount = 0;
-    let otherCount = 0;
     let totalEntities = 0;
 
     let parsingEntity = false;
@@ -165,90 +64,106 @@ async function parseDXFStreaming(filePath) {
       totalEntities++;
       entityData.type = entityType;
 
-      // Handle polyline closure detection
+      // Handle polyline vertices
       if ((entityType === 'LWPOLYLINE' || entityType === 'POLYLINE') && curVx !== null) {
-        entityVerts.push({ x: curVx, y: 0 });
+        entityVerts.push({ x: curVx, y: entityData.y || 0 });
       }
+
+      // Check if polyline is closed
+      let isClosed = false;
       if (entityVerts.length >= 3) {
         const first = entityVerts[0];
         const last = entityVerts[entityVerts.length - 1];
-        const isClosed = Math.hypot(first.x - last.x, first.y - last.y) < 0.1;
-        if (isClosed) closedPolyCount++;
+        isClosed = Math.hypot((first.x || 0) - (last.x || 0), (first.y || 0) - (last.y || 0)) < 0.1;
       }
 
-      // Store based on type - KEEP ALL important entities
+      const entity = {
+        type: entityType,
+        layer: entityData.layer || '0',
+        x: entityData.x,
+        y: entityData.y,
+        x2: entityData.x2,
+        y2: entityData.y2
+      };
+
+      // Store based on type
       switch (entityType) {
         case 'TEXT':
         case 'MTEXT':
         case 'ATTRIB':
         case 'ATTDEF':
-          // ALWAYS store ALL text entities - these are CRITICAL
           if (entityData.text) {
             texts.push({
+              ...entity,
               text: entityData.text,
-              x: entityData.x,
-              y: entityData.y,
-              layer: entityData.layer || '0',
               height: entityData.height
             });
           }
           break;
 
         case 'CIRCLE':
-          // ALWAYS store ALL circles - potential fire safety symbols
           circles.push({
-            x: entityData.x,
-            y: entityData.y,
-            r: entityData.radius,
-            layer: entityData.layer || '0'
+            ...entity,
+            radius: entityData.radius
           });
           break;
 
         case 'ARC':
-          arcCount++;
-          // Keep samples for door swing detection (90° arcs with typical door radius)
-          if (arcSamples.length < 1000) {
-            const sweep = Math.abs((entityData.endAngle || 0) - (entityData.startAngle || 0));
-            const r = entityData.radius || 0;
-            // Door swings: ~90° sweep, 0.7-1.5m radius
-            if (sweep >= 80 && sweep <= 100 && r >= 0.5 && r <= 2.0) {
-              arcSamples.push({
-                x: entityData.x,
-                y: entityData.y,
-                r: r,
-                sweep: sweep,
-                layer: entityData.layer || '0'
-              });
-            }
-          }
-          break;
-
-        case 'INSERT':
-          // Store ALL block references - they indicate symbols
-          blockRefs.push({
-            blockName: entityData.blockName,
-            x: entityData.x,
-            y: entityData.y,
-            layer: entityData.layer || '0'
+          arcs.push({
+            ...entity,
+            radius: entityData.radius,
+            startAngle: entityData.startAngle,
+            endAngle: entityData.endAngle,
+            sweep: Math.abs((entityData.endAngle || 0) - (entityData.startAngle || 0))
           });
           break;
 
         case 'LINE':
-          lineCount++;
-          // Don't store coordinates - just count
+          lines.push(entity);
           break;
 
         case 'LWPOLYLINE':
         case 'POLYLINE':
-          polylineCount++;
-          // Don't store coordinates - just count
+          polylines.push({
+            ...entity,
+            vertices: [...entityVerts],
+            closed: isClosed || (entityData.flags & 1) === 1
+          });
           break;
 
-        default:
-          otherCount++;
+        case 'INSERT':
+          blockRefs.push({
+            ...entity,
+            blockName: entityData.blockName,
+            scaleX: entityData.scaleX || 1,
+            scaleY: entityData.scaleY || 1,
+            rotation: entityData.rotation || 0
+          });
+          break;
+
+        case 'DIMENSION':
+          dimensions.push({
+            ...entity,
+            value: entityData.text,
+            dimType: entityData.dimType
+          });
+          break;
+
+        case 'HATCH':
+          hatches.push({
+            ...entity,
+            pattern: entityData.pattern
+          });
+          break;
       }
 
-      // Reset for next entity
+      // If inside a block, also store to block entities
+      if (inBlock && currentBlockName) {
+        if (!blocks[currentBlockName]) blocks[currentBlockName] = { entities: [] };
+        blocks[currentBlockName].entities.push({ type: entityType, ...entityData });
+      }
+
+      // Reset
       parsingEntity = false;
       entityType = null;
       entityData = {};
@@ -281,9 +196,6 @@ async function parseDXFStreaming(filePath) {
           }
           if (value === 'ENDBLK') {
             finalizeEntity();
-            if (currentBlockName) {
-              blocks[currentBlockName] = true; // Just track that block exists
-            }
             inBlock = false;
             currentBlockName = null;
             return;
@@ -293,12 +205,16 @@ async function parseDXFStreaming(filePath) {
         if (currentSection === 'TABLES') {
           if (value === 'LAYER') {
             parsingLayer = true;
-            layerData = { name: '', color: 7 };
+            layerData = { name: '', color: 7, frozen: false, off: false };
             return;
           }
           if (parsingLayer && value !== 'LAYER') {
             if (layerData.name) {
-              layers[layerData.name] = { color: layerData.color };
+              layers[layerData.name] = {
+                color: layerData.color,
+                frozen: layerData.frozen,
+                off: layerData.off
+              };
             }
             parsingLayer = false;
             layerData = {};
@@ -332,6 +248,11 @@ async function parseDXFStreaming(filePath) {
       if (parsingLayer) {
         if (code === 2) layerData.name = value;
         else if (code === 62) layerData.color = parseInt(value);
+        else if (code === 70) {
+          const flags = parseInt(value);
+          layerData.frozen = (flags & 1) !== 0;
+          layerData.off = (flags & 4) !== 0;
+        }
         return;
       }
 
@@ -356,24 +277,28 @@ async function parseDXFStreaming(filePath) {
               entityData.y = parseFloat(value);
             }
             break;
+          case 11: entityData.x2 = parseFloat(value); break;
+          case 21: entityData.y2 = parseFloat(value); break;
           case 40:
             entityData.radius = parseFloat(value);
             entityData.height = parseFloat(value);
             break;
-          case 50: entityData.startAngle = parseFloat(value); break;
+          case 41: entityData.scaleX = parseFloat(value); break;
+          case 42: entityData.scaleY = parseFloat(value); break;
+          case 50: entityData.startAngle = parseFloat(value); entityData.rotation = parseFloat(value); break;
           case 51: entityData.endAngle = parseFloat(value); break;
+          case 70: entityData.flags = parseInt(value); entityData.dimType = parseInt(value); break;
         }
       }
     }
 
-    // Progress logging
     let lineNumber = 0;
     const logInterval = 500000;
 
     rl.on('line', (line) => {
       lineNumber++;
       if (lineNumber % logInterval === 0) {
-        console.log(`    Parsed ${(lineNumber / 1000000).toFixed(1)}M lines, ${totalEntities} entities, ${texts.length} texts...`);
+        console.log(`    Parsed ${(lineNumber / 1000000).toFixed(1)}M lines, ${totalEntities} entities...`);
       }
 
       const trimmed = line.trim();
@@ -391,35 +316,15 @@ async function parseDXFStreaming(filePath) {
 
       console.log('  Parse complete:');
       console.log(`    Total entities: ${totalEntities}`);
-      console.log(`    TEXT/MTEXT: ${texts.length}`);
-      console.log(`    CIRCLE: ${circles.length}`);
-      console.log(`    ARC: ${arcCount} (${arcSamples.length} door-like samples)`);
-      console.log(`    LINE: ${lineCount}`);
-      console.log(`    POLYLINE: ${polylineCount} (${closedPolyCount} closed)`);
-      console.log(`    Block refs: ${blockRefs.length}`);
-      console.log(`    Blocks defined: ${Object.keys(blocks).length}`);
-      console.log(`    Layers: ${Object.keys(layers).length}`);
+      console.log(`    Texts: ${texts.length}, Circles: ${circles.length}, Arcs: ${arcs.length}`);
+      console.log(`    Lines: ${lines.length}, Polylines: ${polylines.length}`);
+      console.log(`    Block refs: ${blockRefs.length}, Dimensions: ${dimensions.length}`);
+      console.log(`    Layers: ${Object.keys(layers).length}, Blocks defined: ${Object.keys(blocks).length}`);
 
       resolve({
-        texts,
-        circles,
-        arcSamples,
-        blockRefs,
-        blocks: Object.keys(blocks),
-        layers: Object.keys(layers),
-        counts: {
-          total: totalEntities,
-          texts: texts.length,
-          circles: circles.length,
-          arcs: arcCount,
-          arcSamples: arcSamples.length,
-          lines: lineCount,
-          polylines: polylineCount,
-          closedPolys: closedPolyCount,
-          blockRefs: blockRefs.length,
-          blocks: Object.keys(blocks).length,
-          layers: Object.keys(layers).length
-        }
+        texts, circles, arcs, lines, polylines, blockRefs, dimensions, hatches,
+        blocks, layers,
+        totalEntities
       });
     });
 
@@ -428,176 +333,512 @@ async function parseDXFStreaming(filePath) {
   });
 }
 
-// ============ BUILD TEXT SUMMARY FOR CLAUDE ============
-function buildVectorSummary(parsed) {
-  const { texts, circles, arcSamples, blockRefs, blocks, layers, counts } = parsed;
+// ============ BUILD OBJECT TREE GROUPED BY LAYER ============
+function buildObjectTree(parsed) {
+  console.log('  Building object tree by layer...');
 
-  let summary = `
-=== DXF VECTOR DATA ANALYSIS ===
+  const tree = {
+    layers: {},
+    summary: {
+      totalEntities: parsed.totalEntities,
+      layerCount: Object.keys(parsed.layers).length,
+      textCount: parsed.texts.length,
+      circleCount: parsed.circles.length,
+      arcCount: parsed.arcs.length
+    }
+  };
 
-ENTITY COUNTS (parsed ${counts.total.toLocaleString()} total entities):
-- TEXT/MTEXT labels: ${counts.texts}
-- CIRCLE entities: ${counts.circles}
-- ARC entities: ${counts.arcs} (${counts.arcSamples} appear to be door swings)
-- LINE entities: ${counts.lines.toLocaleString()}
-- POLYLINE entities: ${counts.polylines.toLocaleString()} (${counts.closedPolys} closed/rooms)
-- Block references: ${counts.blockRefs}
-- Blocks defined: ${counts.blocks}
-- Layers: ${counts.layers}
+  // Initialize layers
+  Object.keys(parsed.layers).forEach(name => {
+    tree.layers[name] = {
+      info: parsed.layers[name],
+      texts: [],
+      circles: [],
+      arcs: [],
+      lines: [],
+      polylines: [],
+      blockRefs: [],
+      dimensions: []
+    };
+  });
 
-LAYERS: ${layers.join(', ') || 'Only layer 0'}
-
-`;
-
-  // ALL TEXT CONTENT - CRITICAL
-  summary += `=== ALL TEXT LABELS (${texts.length} found) ===\n`;
-  if (texts.length === 0) {
-    summary += 'WARNING: No text entities found. The drawing may be using blocks or attributes for labels.\n';
-  } else {
-    texts.forEach((t, i) => {
-      const pos = t.x !== undefined ? ` at (${t.x.toFixed(1)}, ${t.y.toFixed(1)})` : '';
-      const layer = t.layer !== '0' ? ` [${t.layer}]` : '';
-      summary += `${i + 1}. "${t.text}"${pos}${layer}\n`;
-    });
+  // Add default layer 0 if not exists
+  if (!tree.layers['0']) {
+    tree.layers['0'] = {
+      info: { color: 7 },
+      texts: [], circles: [], arcs: [], lines: [], polylines: [], blockRefs: [], dimensions: []
+    };
   }
 
-  // CIRCLE PATTERNS (potential symbols)
-  summary += `\n=== CIRCLE PATTERNS (${circles.length} circles) ===\n`;
-  if (circles.length > 0) {
-    // Group by radius
-    const byRadius = {};
-    circles.forEach(c => {
-      if (c.r === undefined) return;
-      const rKey = c.r.toFixed(2);
-      if (!byRadius[rKey]) byRadius[rKey] = { count: 0, samples: [] };
-      byRadius[rKey].count++;
-      if (byRadius[rKey].samples.length < 3) {
-        byRadius[rKey].samples.push({ x: c.x, y: c.y, layer: c.layer });
+  // Distribute entities to layers
+  const distribute = (entities, targetKey) => {
+    entities.forEach(e => {
+      const layerName = e.layer || '0';
+      if (!tree.layers[layerName]) {
+        tree.layers[layerName] = {
+          info: { color: 7 },
+          texts: [], circles: [], arcs: [], lines: [], polylines: [], blockRefs: [], dimensions: []
+        };
+      }
+      tree.layers[layerName][targetKey].push(e);
+    });
+  };
+
+  distribute(parsed.texts, 'texts');
+  distribute(parsed.circles, 'circles');
+  distribute(parsed.arcs, 'arcs');
+  distribute(parsed.lines, 'lines');
+  distribute(parsed.polylines, 'polylines');
+  distribute(parsed.blockRefs, 'blockRefs');
+  distribute(parsed.dimensions, 'dimensions');
+
+  // Add block definitions
+  tree.blocks = parsed.blocks;
+
+  console.log(`  Object tree built: ${Object.keys(tree.layers).length} layers`);
+  return tree;
+}
+
+// ============ CLASSIFY FIRE SAFETY ELEMENTS ============
+function classifyFireSafety(tree) {
+  console.log('  Classifying fire safety elements...');
+
+  const classified = {
+    sprinklers: [],
+    smokeDetectors: [],
+    heatDetectors: [],
+    fireExtinguishers: [],
+    hydrants: [],
+    fireDoors: [],
+    exits: [],
+    stairs: [],
+    fireWalls: [],
+    elevators: [],
+    corridors: [],
+    rooms: [],
+    unknown: []
+  };
+
+  // Patterns for classification
+  const patterns = {
+    sprinklers: /ספרינק|מתז|SPRINK|SPR[-_]?\d|HEAD/i,
+    smokeDetectors: /גלאי.?עשן|עשן|SMOKE|SD[-_]?\d|DETECTOR/i,
+    heatDetectors: /גלאי.?חום|חום|HEAT|HD[-_]?\d/i,
+    fireExtinguishers: /מטף|מטפה|EXTING|FE[-_]?\d|FIRE.?EXT/i,
+    hydrants: /הידרנט|ברז.?כיבוי|ברז.?אש|HYDRANT|FH|IH|STANDPIPE/i,
+    fireDoors: /דלת.?אש|FIRE.?DOOR|FD[-_]?\d|דא/i,
+    exits: /יציאה|מוצא|יציאת.?חירום|EXIT|EMERG/i,
+    stairs: /מדרגות|STAIR|מדרגות.?חירום/i,
+    fireWalls: /קיר.?אש|FIRE.?WALL|FW/i,
+    elevators: /מעלית|ELEVATOR|LIFT|EL/i,
+    corridors: /מסדרון|CORRIDOR|HALL/i
+  };
+
+  // Classify texts
+  Object.values(tree.layers).forEach(layer => {
+    layer.texts.forEach(text => {
+      const content = text.text || '';
+      let found = false;
+
+      for (const [category, pattern] of Object.entries(patterns)) {
+        if (pattern.test(content)) {
+          classified[category].push({
+            type: 'text',
+            text: content,
+            x: text.x,
+            y: text.y,
+            layer: text.layer
+          });
+          found = true;
+          break;
+        }
+      }
+
+      if (!found && content.length > 0) {
+        classified.unknown.push({ type: 'text', text: content, x: text.x, y: text.y, layer: text.layer });
       }
     });
 
-    const sorted = Object.entries(byRadius).sort((a, b) => b[1].count - a[1].count);
-    sorted.slice(0, 20).forEach(([r, info]) => {
-      const samples = info.samples.map(s => `(${s.x?.toFixed(0)},${s.y?.toFixed(0)})`).join(', ');
-      summary += `- Radius ${r}: ${info.count} circles`;
-      if (info.count >= 10) summary += ' [LIKELY SYMBOL PATTERN]';
-      summary += `\n  Samples: ${samples}\n`;
+    // Classify block references
+    layer.blockRefs.forEach(ref => {
+      const blockName = ref.blockName || '';
+
+      for (const [category, pattern] of Object.entries(patterns)) {
+        if (pattern.test(blockName)) {
+          classified[category].push({
+            type: 'block',
+            blockName,
+            x: ref.x,
+            y: ref.y,
+            layer: ref.layer
+          });
+          break;
+        }
+      }
     });
-  }
+  });
 
-  // ARC SAMPLES (door swings)
-  summary += `\n=== DOOR SWING ARCS (${counts.arcSamples} detected) ===\n`;
-  if (arcSamples.length > 0) {
-    const radii = [...new Set(arcSamples.map(a => a.r?.toFixed(2)))];
-    summary += `Door swing radii found: ${radii.join(', ')} units\n`;
-    summary += `Estimated door count: ${arcSamples.length}\n`;
-  }
-
-  // BLOCK REFERENCES
-  summary += `\n=== BLOCK REFERENCES ===\n`;
-  if (blockRefs.length === 0) {
-    summary += 'No block references found (drawing may be exploded).\n';
-  } else {
-    const blockCounts = {};
-    blockRefs.forEach(b => {
-      blockCounts[b.blockName] = (blockCounts[b.blockName] || 0) + 1;
-    });
-    Object.entries(blockCounts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 30)
-      .forEach(([name, count]) => {
-        summary += `- ${name}: ${count} instances\n`;
-      });
-  }
-
-  // FIRE SAFETY KEYWORD SEARCH
-  summary += `\n=== FIRE SAFETY KEYWORDS FOUND ===\n`;
-  const fireKeywords = {
-    'ספרינקלר/מתז': /ספרינק|מתז|SPRINK|SPR[-_]?\d/i,
-    'גלאי עשן': /גלאי.?עשן|עשן|SMOKE|SD[-_]?\d/i,
-    'גלאי חום': /גלאי.?חום|חום|HEAT|HD[-_]?\d/i,
-    'מטף כיבוי': /מטף|מטפה|EXTING|FE[-_]?\d/i,
-    'הידרנט': /הידרנט|ברז.?כיבוי|ברז.?אש|HYDRANT|FH|IH/i,
-    'יציאה/מוצא': /יציאה|מוצא|EXIT/i,
-    'מדרגות': /מדרגות|STAIR/i,
-    'דלת אש': /דלת.?אש|FIRE.?DOOR|FD/i,
-    'חירום': /חירום|EMERGENCY|EMERG/i,
-    'קיר אש': /קיר.?אש|FIRE.?WALL/i,
-    'מעלית': /מעלית|ELEVATOR|LIFT/i,
-  };
-
-  Object.entries(fireKeywords).forEach(([name, pattern]) => {
-    const matches = texts.filter(t => pattern.test(t.text || ''));
-    if (matches.length > 0) {
-      summary += `\n${name}: ${matches.length} labels\n`;
-      matches.slice(0, 5).forEach(m => {
-        summary += `  - "${m.text}" at (${m.x?.toFixed(0)}, ${m.y?.toFixed(0)})\n`;
-      });
+  // Classify by layer names
+  Object.entries(tree.layers).forEach(([layerName, layer]) => {
+    for (const [category, pattern] of Object.entries(patterns)) {
+      if (pattern.test(layerName)) {
+        // All circles on this layer are likely that category
+        layer.circles.forEach(c => {
+          classified[category].push({
+            type: 'circle',
+            x: c.x,
+            y: c.y,
+            radius: c.radius,
+            layer: layerName,
+            fromLayerMatch: true
+          });
+        });
+        break;
+      }
     }
   });
 
-  // Check block names for fire safety
-  const fireBlockPattern = /SPRINK|SMOKE|FIRE|EXIT|EXTING|HYDRANT|DETECT|ALARM|SPR|SD|FE|FH|FD/i;
-  const fireBlocks = blocks.filter(b => fireBlockPattern.test(b));
-  if (fireBlocks.length > 0) {
-    summary += `\nFire-related blocks: ${fireBlocks.join(', ')}\n`;
-  }
-
-  // Check block references for fire safety
-  const fireRefs = blockRefs.filter(b => fireBlockPattern.test(b.blockName || ''));
-  if (fireRefs.length > 0) {
-    const refCounts = {};
-    fireRefs.forEach(r => { refCounts[r.blockName] = (refCounts[r.blockName] || 0) + 1; });
-    summary += `\nFire-related block placements:\n`;
-    Object.entries(refCounts).forEach(([name, count]) => {
-      summary += `  - ${name}: ${count} instances\n`;
+  // Detect door swings from arcs (90-degree arcs with typical door radius)
+  Object.values(tree.layers).forEach(layer => {
+    layer.arcs.forEach(arc => {
+      const sweep = arc.sweep || 0;
+      const radius = arc.radius || 0;
+      // Door swings: ~90° sweep, 0.7-1.2m radius
+      if (sweep >= 80 && sweep <= 100 && radius >= 0.6 && radius <= 1.5) {
+        classified.fireDoors.push({
+          type: 'doorSwing',
+          x: arc.x,
+          y: arc.y,
+          radius,
+          sweep,
+          layer: arc.layer
+        });
+      }
     });
-  }
+  });
 
-  return summary;
+  // Identify rooms from closed polylines
+  Object.values(tree.layers).forEach(layer => {
+    layer.polylines.forEach(poly => {
+      if (poly.closed && poly.vertices && poly.vertices.length >= 4) {
+        // Calculate approximate area
+        let area = 0;
+        const verts = poly.vertices;
+        for (let i = 0; i < verts.length; i++) {
+          const j = (i + 1) % verts.length;
+          area += (verts[i].x || 0) * (verts[j].y || 0);
+          area -= (verts[j].x || 0) * (verts[i].y || 0);
+        }
+        area = Math.abs(area) / 2;
+
+        // Only include reasonable room sizes (> 1 sqm)
+        if (area > 1) {
+          classified.rooms.push({
+            type: 'room',
+            vertices: verts,
+            area,
+            layer: poly.layer
+          });
+        }
+      }
+    });
+  });
+
+  console.log('  Classification complete:');
+  Object.entries(classified).forEach(([cat, items]) => {
+    if (items.length > 0) console.log(`    ${cat}: ${items.length}`);
+  });
+
+  return classified;
 }
 
-// ============ MAIN FUNCTION - NO IMAGES ============
-async function analyzeDXF(filePath) {
-  console.log('DXF Analysis v12 - Pure text extraction (NO IMAGES)...');
+// ============ MEASURE DISTANCES ============
+function measureDistances(classified) {
+  console.log('  Measuring distances...');
 
-  // STEP 1: Run raw diagnostics BEFORE parsing
-  const diagnostics = runRawDiagnostics(filePath);
+  const measurements = {
+    sprinklerSpacing: { min: null, max: null, avg: null, count: 0 },
+    detectorSpacing: { min: null, max: null, avg: null, count: 0 },
+    exitDistances: [],
+    extinguisherCoverage: { maxDistance: null },
+    doorWidths: []
+  };
 
-  // STEP 2: Parse with streaming
-  const parsed = await parseDXFStreaming(filePath);
+  // Helper: calculate distance between two points
+  const dist = (p1, p2) => Math.hypot((p1.x || 0) - (p2.x || 0), (p1.y || 0) - (p2.y || 0));
 
-  console.log('  Building vector summary for Claude...');
-  const vectorSummary = buildVectorSummary(parsed);
+  // Sprinkler spacing
+  if (classified.sprinklers.length >= 2) {
+    const sprinklers = classified.sprinklers.filter(s => s.x !== undefined);
+    const spacings = [];
 
-  console.log(`  Summary: ${vectorSummary.length} characters`);
+    sprinklers.forEach((s1, i) => {
+      let nearest = Infinity;
+      sprinklers.forEach((s2, j) => {
+        if (i !== j) {
+          const d = dist(s1, s2);
+          if (d > 0.1 && d < nearest) nearest = d;
+        }
+      });
+      if (nearest < Infinity) spacings.push(nearest);
+    });
 
-  // Force garbage collection if available
-  if (global.gc) {
-    global.gc();
-    console.log('  Memory cleaned');
+    if (spacings.length > 0) {
+      measurements.sprinklerSpacing = {
+        min: Math.min(...spacings),
+        max: Math.max(...spacings),
+        avg: spacings.reduce((a, b) => a + b, 0) / spacings.length,
+        count: sprinklers.length
+      };
+    }
   }
 
-  return {
-    vectorSummary,
-    parsed: {
-      entityCount: parsed.counts.total,
-      textCount: parsed.counts.texts,
-      circleCount: parsed.counts.circles,
-      arcCount: parsed.counts.arcs,
-      lineCount: parsed.counts.lines,
-      polylineCount: parsed.counts.polylines,
-      closedPolyCount: parsed.counts.closedPolys,
-      blockRefCount: parsed.counts.blockRefs,
-      blockCount: parsed.counts.blocks,
-      layerCount: parsed.counts.layers
+  // Smoke detector spacing
+  const detectors = [...classified.smokeDetectors, ...classified.heatDetectors];
+  if (detectors.length >= 2) {
+    const spacings = [];
+    detectors.filter(d => d.x !== undefined).forEach((d1, i) => {
+      let nearest = Infinity;
+      detectors.forEach((d2, j) => {
+        if (i !== j && d2.x !== undefined) {
+          const d = dist(d1, d2);
+          if (d > 0.1 && d < nearest) nearest = d;
+        }
+      });
+      if (nearest < Infinity) spacings.push(nearest);
+    });
+
+    if (spacings.length > 0) {
+      measurements.detectorSpacing = {
+        min: Math.min(...spacings),
+        max: Math.max(...spacings),
+        avg: spacings.reduce((a, b) => a + b, 0) / spacings.length,
+        count: detectors.length
+      };
+    }
+  }
+
+  // Door widths from door swing radii
+  classified.fireDoors.filter(d => d.type === 'doorSwing').forEach(door => {
+    measurements.doorWidths.push({
+      width: door.radius,
+      x: door.x,
+      y: door.y
+    });
+  });
+
+  console.log('  Measurements complete');
+  return measurements;
+}
+
+// ============ BUILD STRUCTURED REPORT DATA FOR CLAUDE ============
+function buildReportData(tree, classified, measurements) {
+  console.log('  Building structured report data...');
+
+  // Calculate total area from rooms
+  const totalArea = classified.rooms.reduce((sum, r) => sum + (r.area || 0), 0);
+
+  const reportData = {
+    summary: {
+      totalEntities: tree.summary.totalEntities,
+      layerCount: tree.summary.layerCount,
+      textLabels: tree.summary.textCount,
+      estimatedArea: totalArea
     },
-    counts: parsed.counts
+    layers: Object.entries(tree.layers).map(([name, layer]) => ({
+      name,
+      entityCount: layer.texts.length + layer.circles.length + layer.arcs.length +
+                   layer.lines.length + layer.polylines.length + layer.blockRefs.length
+    })).filter(l => l.entityCount > 0).sort((a, b) => b.entityCount - a.entityCount),
+
+    fireSafety: {
+      sprinklers: {
+        count: classified.sprinklers.length,
+        spacing: measurements.sprinklerSpacing
+      },
+      smokeDetectors: {
+        count: classified.smokeDetectors.length,
+        spacing: measurements.detectorSpacing
+      },
+      heatDetectors: {
+        count: classified.heatDetectors.length
+      },
+      fireExtinguishers: {
+        count: classified.fireExtinguishers.length
+      },
+      hydrants: {
+        count: classified.hydrants.length
+      },
+      fireDoors: {
+        count: classified.fireDoors.length,
+        doorSwings: classified.fireDoors.filter(d => d.type === 'doorSwing').length,
+        widths: measurements.doorWidths
+      },
+      exits: {
+        count: classified.exits.length,
+        locations: classified.exits.slice(0, 20)
+      },
+      stairs: {
+        count: classified.stairs.length
+      },
+      fireWalls: {
+        count: classified.fireWalls.length
+      },
+      elevators: {
+        count: classified.elevators.length
+      }
+    },
+
+    texts: classified.unknown.slice(0, 100).map(t => ({
+      text: t.text,
+      layer: t.layer,
+      position: t.x !== undefined ? `(${t.x.toFixed(0)}, ${t.y.toFixed(0)})` : null
+    })),
+
+    rooms: {
+      count: classified.rooms.length,
+      totalArea,
+      largest: classified.rooms.sort((a, b) => b.area - a.area).slice(0, 5).map(r => ({
+        area: r.area,
+        layer: r.layer
+      }))
+    },
+
+    blocks: Object.keys(tree.blocks).slice(0, 50)
+  };
+
+  return reportData;
+}
+
+// ============ FORMAT REPORT DATA AS TEXT FOR CLAUDE ============
+function formatReportForClaude(reportData) {
+  let text = `=== נתוני תוכנית בטיחות אש ===
+
+סיכום כללי:
+- סה"כ אלמנטים: ${reportData.summary.totalEntities.toLocaleString()}
+- מספר שכבות: ${reportData.summary.layerCount}
+- תוויות טקסט: ${reportData.summary.textLabels}
+- שטח משוער: ${reportData.summary.estimatedArea.toFixed(1)} יח' מרובעות
+
+שכבות (${reportData.layers.length}):
+${reportData.layers.slice(0, 30).map(l => `  - ${l.name}: ${l.entityCount} אלמנטים`).join('\n')}
+
+=== מערכות בטיחות אש ===
+
+ספרינקלרים: ${reportData.fireSafety.sprinklers.count}
+${reportData.fireSafety.sprinklers.count > 0 ? `  - מרחק מינימלי: ${reportData.fireSafety.sprinklers.spacing.min?.toFixed(2) || 'N/A'} יח'
+  - מרחק מקסימלי: ${reportData.fireSafety.sprinklers.spacing.max?.toFixed(2) || 'N/A'} יח'
+  - מרחק ממוצע: ${reportData.fireSafety.sprinklers.spacing.avg?.toFixed(2) || 'N/A'} יח'` : ''}
+
+גלאי עשן: ${reportData.fireSafety.smokeDetectors.count}
+${reportData.fireSafety.smokeDetectors.count > 0 ? `  - מרחק ממוצע: ${reportData.fireSafety.smokeDetectors.spacing.avg?.toFixed(2) || 'N/A'} יח'` : ''}
+
+גלאי חום: ${reportData.fireSafety.heatDetectors.count}
+
+מטפי כיבוי: ${reportData.fireSafety.fireExtinguishers.count}
+
+הידרנטים/ברזי כיבוי: ${reportData.fireSafety.hydrants.count}
+
+דלתות אש: ${reportData.fireSafety.fireDoors.count}
+  - כיווני פתיחה מזוהים: ${reportData.fireSafety.fireDoors.doorSwings}
+${reportData.fireSafety.fireDoors.widths.length > 0 ? `  - רוחב דלתות: ${reportData.fireSafety.fireDoors.widths.map(d => d.width.toFixed(2)).join(', ')} יח'` : ''}
+
+יציאות חירום: ${reportData.fireSafety.exits.count}
+${reportData.fireSafety.exits.locations.length > 0 ? reportData.fireSafety.exits.locations.slice(0, 10).map(e =>
+  `  - "${e.text || e.blockName}" ${e.x !== undefined ? `במיקום (${e.x.toFixed(0)}, ${e.y.toFixed(0)})` : ''}`
+).join('\n') : ''}
+
+מדרגות: ${reportData.fireSafety.stairs.count}
+
+קירות אש: ${reportData.fireSafety.fireWalls.count}
+
+מעליות: ${reportData.fireSafety.elevators.count}
+
+=== חדרים ===
+מספר חדרים מזוהים: ${reportData.rooms.count}
+שטח כולל: ${reportData.rooms.totalArea.toFixed(1)} יח' מרובעות
+${reportData.rooms.largest.length > 0 ? `החדרים הגדולים:\n${reportData.rooms.largest.map((r, i) =>
+  `  ${i + 1}. שטח ${r.area.toFixed(1)} יח' (שכבה: ${r.layer})`
+).join('\n')}` : ''}
+
+=== בלוקים מוגדרים ===
+${reportData.blocks.length > 0 ? reportData.blocks.join(', ') : 'לא נמצאו בלוקים'}
+
+=== טקסטים נוספים ===
+${reportData.texts.slice(0, 50).map(t => `- "${t.text}" [${t.layer}]${t.position ? ` ${t.position}` : ''}`).join('\n')}
+`;
+
+  return text;
+}
+
+// ============ MAIN ANALYSIS FUNCTION ============
+async function analyzeDXFComplete(filePath) {
+  console.log('=== DXF Complete Analysis v13 ===');
+  console.log(`File: ${filePath}`);
+
+  // 1. Parse
+  console.log('\n[1/5] Parsing DXF...');
+  const parsed = await streamParseDXF(filePath);
+
+  // 2. Build object tree
+  console.log('\n[2/5] Building object tree...');
+  const tree = buildObjectTree(parsed);
+
+  // 3. Classify fire safety elements
+  console.log('\n[3/5] Classifying fire safety elements...');
+  const classified = classifyFireSafety(tree);
+
+  // 4. Measure distances
+  console.log('\n[4/5] Measuring distances...');
+  const measurements = measureDistances(classified);
+
+  // 5. Build report data
+  console.log('\n[5/5] Building report data...');
+  const reportData = buildReportData(tree, classified, measurements);
+  const reportText = formatReportForClaude(reportData);
+
+  console.log('\n=== Analysis Complete ===');
+  console.log(`Report text: ${reportText.length} characters`);
+
+  return {
+    reportText,
+    reportData,
+    classified,
+    measurements,
+    tree,
+    parsed
+  };
+}
+
+// Legacy export for compatibility
+async function analyzeDXF(filePath) {
+  const result = await analyzeDXFComplete(filePath);
+  return {
+    vectorSummary: result.reportText,
+    parsed: {
+      entityCount: result.parsed.totalEntities,
+      textCount: result.parsed.texts.length,
+      circleCount: result.parsed.circles.length,
+      arcCount: result.parsed.arcs.length,
+      lineCount: result.parsed.lines.length,
+      polylineCount: result.parsed.polylines.length
+    },
+    counts: {
+      total: result.parsed.totalEntities,
+      texts: result.parsed.texts.length,
+      circles: result.parsed.circles.length,
+      arcs: result.parsed.arcs.length
+    }
   };
 }
 
 module.exports = {
+  analyzeDXFComplete,
   analyzeDXF,
-  parseDXFStreaming,
-  buildVectorSummary
+  streamParseDXF,
+  buildObjectTree,
+  classifyFireSafety,
+  measureDistances,
+  buildReportData,
+  formatReportForClaude
 };
