@@ -1290,7 +1290,7 @@
       }
 
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('dwgFile', file);
       formData.append('instructionId', currentInstructionId || 'fire-safety');
       if (tempInstructionContent) {
         formData.append('customInstructions', tempInstructionContent);

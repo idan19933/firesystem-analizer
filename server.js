@@ -235,7 +235,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Upload instruction file
-app.post('/api/upload-instructions', instructionUpload.single('file'), async (req, res) => {
+app.post('/api/upload-instructions', instructionUpload.single('instructionFile'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'לא הועלה קובץ' });
@@ -289,7 +289,7 @@ app.delete('/api/instructions/:id', (req, res) => {
 });
 
 // ===== MAIN ANALYSIS ENDPOINT =====
-app.post('/api/analyze', upload.single('file'), async (req, res) => {
+app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
   const startTime = Date.now();
   let tempFiles = [];
 
