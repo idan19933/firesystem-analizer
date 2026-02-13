@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Railway Server v22
+ * Fire Safety Checker - Railway Server v23
  * DXF: Pure text analysis + RAW DIAGNOSTICS
- * DWG: APS vector data extraction - NO IMAGES
- * Both formats now use pure text analysis!
+ * DWG: APS vector extraction + FULL DEBUG LOGGING
+ * Tries ALL GUIDs, handles 202 status, logs everything
  */
 
 const express = require('express');
@@ -413,43 +413,142 @@ ${objects.slice(0, 30).map(obj => {
   return summary;
 }
 
-// Main function: Extract vector data from APS (NO IMAGES)
+// Main function: Extract vector data from APS (NO IMAGES) - WITH FULL DEBUG
 async function extractAPSVectorData(token, urn) {
   console.log('Extracting vector data from APS (no images)...');
+  console.log('URN:', urn);
 
-  // Step 1: Get metadata GUIDs
-  const metaData = await getAPSMetadataGUIDs(token, urn);
-  const viewables = metaData.data?.metadata || [];
+  // Step 1: Get metadata GUIDs with full logging
+  const metaResp = await fetch(
+    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
+  const metaData = await metaResp.json();
+  console.log('FULL METADATA RESPONSE:', JSON.stringify(metaData, null, 2));
 
-  if (viewables.length === 0) {
+  const guids = metaData.data?.metadata || [];
+  console.log(`\nFound ${guids.length} views:`);
+  guids.forEach((g, i) => {
+    console.log(`  View ${i}: guid=${g.guid}, name=${g.name}, role=${g.role}`);
+  });
+
+  if (guids.length === 0) {
     throw new Error('No viewable metadata found in APS translation');
   }
 
-  console.log(`Found ${viewables.length} viewables:`, viewables.map(v => ({ name: v.name, guid: v.guid, role: v.role })));
+  // Step 2: Try ALL GUIDs to find one with data
+  let bestResult = null;
+  let bestObjectCount = 0;
 
-  // Prefer 2D views, fall back to first available
-  const view2D = viewables.find(v => v.role === '2d' || v.name?.includes('2D') || v.name?.includes('Model'));
-  const selectedView = view2D || viewables[0];
-  const guid = selectedView.guid;
+  for (const view of guids) {
+    console.log(`\n=== Trying view: ${view.name} (${view.guid}) ===`);
 
-  console.log(`Selected view: ${selectedView.name} (${guid})`);
+    // Get properties with retry for 202 status
+    let propsData = null;
+    let attempts = 0;
+    const maxAttempts = 3;
 
-  // Step 2: Get all properties
-  const propertiesData = await getAPSProperties(token, urn, guid);
+    while (attempts < maxAttempts) {
+      const propsResp = await fetch(
+        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${view.guid}/properties?forceget=true`,
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
 
-  // Step 3: Get object tree
-  const treeData = await getAPSObjectTree(token, urn, guid);
+      console.log(`  Properties status: ${propsResp.status}`);
 
-  // Step 4: Build summary
-  const vectorSummary = buildAPSVectorSummary(propertiesData, treeData);
+      if (propsResp.status === 202) {
+        console.log('  Properties still processing, waiting 10 seconds...');
+        await new Promise(r => setTimeout(r, 10000));
+        attempts++;
+        continue;
+      }
+
+      if (propsResp.ok) {
+        propsData = await propsResp.json();
+        break;
+      } else {
+        console.log(`  Properties request failed: ${propsResp.status}`);
+        const errorText = await propsResp.text();
+        console.log(`  Error: ${errorText.substring(0, 500)}`);
+        break;
+      }
+    }
+
+    const objectCount = propsData?.data?.collection?.length || 0;
+    console.log(`  Objects found: ${objectCount}`);
+
+    // Log first 3 objects if any
+    if (objectCount > 0) {
+      console.log('  First 3 objects:');
+      propsData.data.collection.slice(0, 3).forEach((obj, i) => {
+        console.log(`    Object ${i}: ${JSON.stringify(obj, null, 2).substring(0, 500)}`);
+      });
+    }
+
+    // Also try the object tree
+    const treeResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${view.guid}?forceget=true`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+
+    let treeData = null;
+    if (treeResp.ok) {
+      treeData = await treeResp.json();
+      const treeObjects = treeData.data?.objects?.[0]?.objects || [];
+      console.log(`  Tree root objects: ${treeObjects.length}`);
+
+      // Log first few tree nodes
+      if (treeObjects.length > 0) {
+        console.log('  First 5 tree nodes:');
+        treeObjects.slice(0, 5).forEach(node => {
+          console.log(`    Node: name="${node.name}", children=${node.objects?.length || 0}`);
+        });
+      }
+    } else {
+      console.log(`  Tree request failed: ${treeResp.status}`);
+    }
+
+    // Keep track of best result
+    if (objectCount > bestObjectCount) {
+      bestObjectCount = objectCount;
+      bestResult = {
+        view,
+        propsData,
+        treeData
+      };
+    }
+  }
+
+  // Use best result or fall back to first view
+  if (!bestResult) {
+    console.log('\nNo properties found in any view, using first view for tree data');
+    const view = guids[0];
+
+    const treeResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${view.guid}?forceget=true`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const treeData = treeResp.ok ? await treeResp.json() : null;
+
+    bestResult = {
+      view,
+      propsData: { data: { collection: [] } },
+      treeData
+    };
+  }
+
+  console.log(`\nUsing view: ${bestResult.view.name} with ${bestObjectCount} objects`);
+
+  // Step 3: Build summary
+  const vectorSummary = buildAPSVectorSummary(bestResult.propsData, bestResult.treeData);
 
   console.log(`Vector summary: ${vectorSummary.length} characters`);
 
   return {
     vectorSummary,
-    objectCount: propertiesData?.data?.collection?.length || 0,
-    viewName: selectedView.name,
-    guid
+    objectCount: bestObjectCount,
+    viewName: bestResult.view.name,
+    guid: bestResult.view.guid
   };
 }
 
@@ -757,7 +856,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '22.0.0-railway'
+    version: '23.0.0-railway'
   });
 });
 
@@ -946,7 +1045,7 @@ const server = app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 22.0.0-railway`);
+  console.log(`   Version: 23.0.0-railway`);
   console.log(`   Timeouts: 25min server, 20min analysis, 15min translation`);
 });
 
