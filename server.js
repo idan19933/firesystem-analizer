@@ -44,7 +44,7 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 // Multer configuration for file uploads
 const upload = multer({
   dest: uploadsDir,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit for DXF files
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit for large DXF files
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     if (['.dxf', '.zip'].includes(ext)) cb(null, true);
