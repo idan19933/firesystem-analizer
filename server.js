@@ -1,7 +1,7 @@
 /**
- * Fire Safety Checker - Railway Server v24
+ * Fire Safety Checker - Railway Server v25
  * DXF: Pure text analysis + RAW DIAGNOSTICS
- * DWG: MULTIPART UPLOAD + FULL DEBUG LOGGING
+ * DWG: MULTIPART UPLOAD + SVF2 DERIVATIVE CHECK FIX
  * Supports large files (32MB+) with chunked S3 upload
  */
 
@@ -306,8 +306,15 @@ async function waitForTranslation(token, urn, maxWait = 900000) { // 15 minutes 
       messages: data.derivatives?.[0]?.messages
     }));
 
-    if (data.status === 'success') {
-      console.log('=== TRANSLATION SUCCESS ===\n');
+    if (data.status === 'success' || data.status === 'complete') {
+      console.log('=== TRANSLATION SUCCESS (manifest status) ===\n');
+      return data;
+    }
+
+    // Check if SVF2 derivative is already done (even if overall status is still "inprogress")
+    const svf2 = data.derivatives?.find(d => d.outputType === 'svf2');
+    if (svf2 && svf2.status === 'success') {
+      console.log('=== TRANSLATION SUCCESS (SVF2 derivative complete) ===\n');
       return data;
     }
 
