@@ -1,7 +1,7 @@
 /**
- * Fire Safety Checker - Railway Server v19
+ * Fire Safety Checker - Railway Server v20
  * DXF: Pure text analysis + RAW DIAGNOSTICS
- * DWG: APS + Claude Vision (unchanged)
+ * DWG: NEW PDF pipeline - APS PDF derivative → pdftoppm → zones → Claude Vision
  */
 
 const express = require('express');
@@ -229,15 +229,226 @@ async function waitForTranslation(token, urn, maxWait = 420000) {
   throw new Error('Translation timeout - try a smaller file');
 }
 
+// ===== NEW PDF-BASED DWG PIPELINE =====
+
+const { execSync } = require('child_process');
+
+// Request PDF derivative from APS
+async function requestPDFDerivative(token, urn) {
+  console.log('Requesting PDF derivative from APS...');
+  const resp = await fetch(
+    'https://developer.api.autodesk.com/modelderivative/v2/designdata/job',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'x-ads-force': 'true'
+      },
+      body: JSON.stringify({
+        input: { urn },
+        output: {
+          formats: [{ type: 'pdf' }]
+        }
+      })
+    }
+  );
+  const data = await resp.json();
+  console.log('PDF derivative request:', data.result || data.status || 'submitted');
+  return data;
+}
+
+// Wait for PDF derivative and get its URN
+async function waitForPDFDerivative(token, urn, maxWait = 300000) {
+  console.log('Waiting for PDF derivative...');
+  const start = Date.now();
+
+  while (Date.now() - start < maxWait) {
+    const resp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const manifest = await resp.json();
+
+    // Log all available derivatives for debugging
+    console.log('Available derivatives:', JSON.stringify(manifest.derivatives?.map(d => ({
+      outputType: d.outputType,
+      status: d.status,
+      children: d.children?.slice(0, 5).map(c => ({ role: c.role, mime: c.mime, urn: c.urn?.substring(0, 50) }))
+    })), null, 2));
+
+    // Look for PDF in derivatives
+    for (const deriv of manifest.derivatives || []) {
+      if (deriv.outputType === 'pdf' && deriv.status === 'success') {
+        // Find the PDF file in children
+        const pdfChild = deriv.children?.find(c => c.mime === 'application/pdf' || c.role === 'pdf');
+        if (pdfChild?.urn) {
+          console.log('PDF derivative ready:', pdfChild.urn.substring(0, 50));
+          return pdfChild.urn;
+        }
+      }
+    }
+
+    // Check if still processing
+    const pdfDeriv = manifest.derivatives?.find(d => d.outputType === 'pdf');
+    if (pdfDeriv) {
+      console.log(`PDF status: ${pdfDeriv.status} (${pdfDeriv.progress || 'unknown'}%)`);
+      if (pdfDeriv.status === 'failed') {
+        console.log('PDF derivative failed, falling back to image pipeline');
+        return null;
+      }
+    }
+
+    await new Promise(r => setTimeout(r, 5000));
+  }
+
+  console.log('PDF derivative timeout, falling back to image pipeline');
+  return null;
+}
+
+// Download a derivative from APS
+async function downloadDerivative(token, urn, derivativeUrn) {
+  const encodedUrn = encodeURIComponent(derivativeUrn);
+  const resp = await fetch(
+    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/derivatives/${encodedUrn}`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
+  if (!resp.ok) throw new Error(`Failed to download derivative: ${resp.status}`);
+  return Buffer.from(await resp.arrayBuffer());
+}
+
+// Convert PDF to high-res PNGs using pdftoppm
+async function convertPDFToPNGs(pdfPath, outputDir) {
+  const outputPrefix = path.join(outputDir, 'page');
+  console.log(`Converting PDF to PNG at 300 DPI...`);
+
+  try {
+    // pdftoppm creates page-1.png, page-2.png, etc.
+    execSync(`pdftoppm -png -r 300 "${pdfPath}" "${outputPrefix}"`, {
+      timeout: 180000,
+      maxBuffer: 100 * 1024 * 1024
+    });
+
+    // Find all generated PNG files
+    const files = fs.readdirSync(outputDir)
+      .filter(f => f.startsWith('page-') && f.endsWith('.png'))
+      .sort();
+
+    console.log(`Generated ${files.length} PNG pages`);
+    return files.map(f => path.join(outputDir, f));
+  } catch (e) {
+    console.error('PDF conversion error:', e.message);
+    throw new Error('Failed to convert PDF to PNG');
+  }
+}
+
+// Split a PNG into zones
+async function splitIntoZones(pngPath, cols = 3, rows = 2) {
+  const sharp = require('sharp');
+  const fullBuffer = fs.readFileSync(pngPath);
+  const metadata = await sharp(fullBuffer).metadata();
+
+  console.log(`  Page size: ${metadata.width}x${metadata.height}`);
+
+  const zoneW = Math.floor(metadata.width / cols);
+  const zoneH = Math.floor(metadata.height / rows);
+  const zones = [];
+
+  const zoneLabels = [
+    ['עליון שמאלי', 'עליון אמצעי', 'עליון ימני'],
+    ['תחתון שמאלי', 'תחתון אמצעי', 'תחתון ימני']
+  ];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const left = c * zoneW;
+      const top = r * zoneH;
+      const width = Math.min(zoneW, metadata.width - left);
+      const height = Math.min(zoneH, metadata.height - top);
+
+      const zoneBuffer = await sharp(fullBuffer)
+        .extract({ left, top, width, height })
+        .resize(4000, 4000, { fit: 'inside', withoutEnlargement: true })
+        .sharpen({ sigma: 1.0 })
+        .png()
+        .toBuffer();
+
+      zones.push({
+        buffer: zoneBuffer,
+        label: zoneLabels[r]?.[c] || `אזור ${r * cols + c + 1}`
+      });
+    }
+  }
+
+  // Also create a resized full page for overview
+  const fullResized = await sharp(fullBuffer)
+    .resize(4000, 4000, { fit: 'inside', withoutEnlargement: true })
+    .png()
+    .toBuffer();
+
+  return { fullPage: fullResized, zones, dimensions: `${metadata.width}x${metadata.height}` };
+}
+
+// Main function: Get high-res images via PDF pipeline
 async function getHighResolutionImages(token, urn) {
   const sharp = require('sharp');
+
+  // Step 1: Request PDF derivative
+  await requestPDFDerivative(token, urn);
+
+  // Step 2: Wait for PDF derivative
+  const pdfUrn = await waitForPDFDerivative(token, urn);
+
+  if (pdfUrn) {
+    // Step 3: Download PDF
+    console.log('Downloading PDF derivative...');
+    const pdfBuffer = await downloadDerivative(token, urn, pdfUrn);
+    console.log(`Downloaded PDF: ${(pdfBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+
+    // Step 4: Save PDF to temp file
+    const pdfId = uuidv4();
+    const pdfDir = path.join(tmpDir, `pdf_${pdfId}`);
+    fs.mkdirSync(pdfDir, { recursive: true });
+    const pdfPath = path.join(pdfDir, 'drawing.pdf');
+    fs.writeFileSync(pdfPath, pdfBuffer);
+
+    // Step 5: Convert PDF to PNGs
+    const pngPaths = await convertPDFToPNGs(pdfPath, pdfDir);
+
+    if (pngPaths.length === 0) {
+      throw new Error('No PNG pages generated from PDF');
+    }
+
+    // Step 6: Process first page (or all pages for multi-page)
+    // For now, process just the first page
+    console.log(`Processing page 1 of ${pngPaths.length}...`);
+    const { fullPage, zones, dimensions } = await splitIntoZones(pngPaths[0]);
+
+    // Cleanup temp files
+    try {
+      fs.rmSync(pdfDir, { recursive: true, force: true });
+    } catch (e) {
+      console.log('Cleanup warning:', e.message);
+    }
+
+    return {
+      fullImage: fullPage,
+      zones,
+      sourceType: 'pdf-derivative',
+      sourceDimensions: dimensions,
+      outputDimensions: '4000x4000 (max)',
+      pageCount: pngPaths.length
+    };
+  }
+
+  // FALLBACK: Use thumbnail/image derivatives if PDF not available
+  console.log('PDF not available, falling back to image derivatives...');
 
   const manifestResp = await fetch(
     `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
     { headers: { 'Authorization': `Bearer ${token}` } }
   );
   const manifest = await manifestResp.json();
-  console.log('Manifest status:', manifest.status);
 
   const derivatives = manifest.derivatives || [];
   const allImages = [];
@@ -247,7 +458,6 @@ async function getHighResolutionImages(token, urn) {
       const name = child.name || parentName;
       if (child.urn && (child.mime?.startsWith('image/') || child.role === 'graphics' || child.role === 'thumbnail')) {
         allImages.push({ urn: child.urn, name: name || 'Image', mime: child.mime, role: child.role });
-        console.log('Found image:', name, child.role, child.mime);
       }
       if (child.children) findImages(child.children, name);
     }
@@ -275,43 +485,32 @@ async function getHighResolutionImages(token, urn) {
     }
   }
 
-  let thumbnailBuffer = null;
-  const resp = await fetch(
-    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/thumbnail?width=400&height=400`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-  if (resp.ok) {
-    thumbnailBuffer = Buffer.from(await resp.arrayBuffer());
-    console.log('Got thumbnail:', thumbnailBuffer.length, 'bytes');
+  // Try thumbnail as last resort
+  if (!bestImage) {
+    const resp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/thumbnail?width=400&height=400`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    if (resp.ok) {
+      bestImage = { buffer: Buffer.from(await resp.arrayBuffer()), name: 'thumbnail' };
+    }
   }
 
-  let sourceBuffer, sourceType;
-  if (bestImage && bestImage.buffer.length > (thumbnailBuffer?.length || 0)) {
-    sourceBuffer = bestImage.buffer;
-    sourceType = 'derivative';
-  } else if (thumbnailBuffer) {
-    sourceBuffer = thumbnailBuffer;
-    sourceType = 'thumbnail';
-  } else {
+  if (!bestImage) {
     throw new Error('No images available from APS');
   }
 
-  const sourceMeta = await sharp(sourceBuffer).metadata();
-  console.log(`Source image: ${sourceMeta.width}x${sourceMeta.height}`);
+  // Process the fallback image
+  const sourceMeta = await sharp(bestImage.buffer).metadata();
+  console.log(`Fallback image: ${sourceMeta.width}x${sourceMeta.height}`);
 
-  const maxSize = 4000;
-  const scale = Math.min(maxSize / (sourceMeta.width || 400), maxSize / (sourceMeta.height || 400), 10);
-  const targetW = Math.round((sourceMeta.width || 400) * scale);
-  const targetH = Math.round((sourceMeta.height || 400) * scale);
-
-  const fullImage = await sharp(sourceBuffer)
-    .resize(targetW, targetH, { kernel: 'lanczos3', fit: 'inside' })
-    .sharpen({ sigma: 1.5, m1: 1.0, m2: 0.5 })
-    .png({ quality: 100, compressionLevel: 6 })
+  const fullImage = await sharp(bestImage.buffer)
+    .resize(4000, 4000, { fit: 'inside', withoutEnlargement: true })
+    .sharpen({ sigma: 1.5 })
+    .png()
     .toBuffer();
 
-  console.log(`Output image: ${targetW}x${targetH}`);
-
+  // Split into 3x3 grid
   const zones = [];
   const imgMeta = await sharp(fullImage).metadata();
   const w = imgMeta.width || 2048;
@@ -340,7 +539,13 @@ async function getHighResolutionImages(token, urn) {
     }
   }
 
-  return { fullImage, zones, sourceType, sourceDimensions: `${sourceMeta.width}x${sourceMeta.height}`, outputDimensions: `${targetW}x${targetH}` };
+  return {
+    fullImage,
+    zones,
+    sourceType: 'image-fallback',
+    sourceDimensions: `${sourceMeta.width}x${sourceMeta.height}`,
+    outputDimensions: `${imgMeta.width}x${imgMeta.height}`
+  };
 }
 
 async function analyzeWithAI(imageBuffers, analysisPrompt) {
@@ -571,7 +776,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '19.0.0-railway'
+    version: '20.0.0-railway'
   });
 });
 
@@ -782,5 +987,5 @@ app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 19.0.0-railway`);
+  console.log(`   Version: 20.0.0-railway`);
 });
