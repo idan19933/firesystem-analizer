@@ -1,7 +1,7 @@
 /**
- * Fire Safety Checker - Railway Server v20
+ * Fire Safety Checker - Railway Server v21
  * DXF: Pure text analysis + RAW DIAGNOSTICS
- * DWG: NEW PDF pipeline - APS PDF derivative → pdftoppm → zones → Claude Vision
+ * DWG: PDF pipeline with extended timeouts for large files
  */
 
 const express = require('express');
@@ -204,7 +204,7 @@ async function translateToSVF2(token, urn) {
   });
 }
 
-async function waitForTranslation(token, urn, maxWait = 420000) {
+async function waitForTranslation(token, urn, maxWait = 900000) { // 15 minutes for large files
   const start = Date.now();
   let lastProgress = '';
 
@@ -776,7 +776,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '20.0.0-railway'
+    version: '21.0.0-railway'
   });
 });
 
@@ -829,7 +829,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
   let extractedFilePath = null;
 
   // Timeout protection - prevent hanging containers
-  const ANALYSIS_TIMEOUT = 300000; // 5 minutes
+  const ANALYSIS_TIMEOUT = 20 * 60 * 1000; // 20 minutes for large DWG files
   const timeoutId = setTimeout(() => {
     if (!res.headersSent) {
       console.error('Analysis timed out after 5 minutes');
@@ -981,11 +981,17 @@ app.get('*', (req, res) => {
   }
 });
 
-// Start server
+// Start server with extended timeouts for large file processing
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 20.0.0-railway`);
+  console.log(`   Version: 21.0.0-railway`);
+  console.log(`   Timeouts: 25min server, 20min analysis, 15min translation`);
 });
+
+// Extended timeouts for large DWG processing (32MB+ files)
+server.timeout = 25 * 60 * 1000;        // 25 minutes
+server.keepAliveTimeout = 25 * 60 * 1000;
+server.headersTimeout = 26 * 60 * 1000;
