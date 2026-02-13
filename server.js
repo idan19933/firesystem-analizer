@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Railway Server v23
+ * Fire Safety Checker - Railway Server v24
  * DXF: Pure text analysis + RAW DIAGNOSTICS
- * DWG: APS vector extraction + FULL DEBUG LOGGING
- * Tries ALL GUIDs, handles 202 status, logs everything
+ * DWG: MULTIPART UPLOAD + FULL DEBUG LOGGING
+ * Supports large files (32MB+) with chunked S3 upload
  */
 
 const express = require('express');
@@ -174,60 +174,159 @@ async function ensureBucket(token) {
 async function uploadToAPS(token, bucketKey, filePath, fileName) {
   const ext = path.extname(fileName).toLowerCase() || '.dwg';
   const safeFileName = `plan_${Date.now()}${ext}`;
-  const fileData = fs.readFileSync(filePath);
 
+  // Get file size and calculate parts needed
+  const fileSize = fs.statSync(filePath).size;
+  const PART_SIZE = 5 * 1024 * 1024; // 5MB parts (APS minimum)
+  const numParts = Math.ceil(fileSize / PART_SIZE);
+
+  console.log('=== APS UPLOAD START ===');
+  console.log(`UPLOAD: File size: ${(fileSize / 1024 / 1024).toFixed(2)} MB`);
+  console.log(`UPLOAD: Bucket: ${bucketKey}`);
+  console.log(`UPLOAD: Object key: ${safeFileName}`);
+  console.log(`UPLOAD: Using ${numParts} parts (${(PART_SIZE / 1024 / 1024).toFixed(0)}MB each)`);
+
+  // Get signed URLs for all parts
   const signedResp = await fetch(
-    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload?parts=1`,
+    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload?parts=${numParts}`,
     { method: 'GET', headers: { 'Authorization': `Bearer ${token}` } }
   );
   const signedData = await signedResp.json();
-  if (!signedData.urls?.[0]) throw new Error('Failed to get signed URL');
 
-  await fetch(signedData.urls[0], { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: fileData });
+  console.log(`UPLOAD: Got ${signedData.urls?.length || 0} signed URLs`);
+  console.log(`UPLOAD: Upload key: ${signedData.uploadKey}`);
 
+  if (!signedData.urls || signedData.urls.length === 0) {
+    console.log('UPLOAD ERROR: No signed URLs received:', JSON.stringify(signedData));
+    throw new Error('Failed to get signed URLs from APS');
+  }
+
+  // Read file data
+  const fileData = fs.readFileSync(filePath);
+
+  // Upload each part
+  const eTags = [];
+  for (let i = 0; i < numParts; i++) {
+    const start = i * PART_SIZE;
+    const end = Math.min(start + PART_SIZE, fileSize);
+    const partData = fileData.slice(start, end);
+
+    console.log(`UPLOAD: Part ${i + 1}/${numParts} - ${partData.length} bytes (${start}-${end})`);
+
+    const partResp = await fetch(signedData.urls[i], {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: partData
+    });
+
+    console.log(`UPLOAD: Part ${i + 1} status: ${partResp.status}`);
+
+    if (!partResp.ok) {
+      const errorText = await partResp.text();
+      console.log(`UPLOAD: Part ${i + 1} ERROR:`, errorText.substring(0, 500));
+      throw new Error(`S3 upload part ${i + 1} failed: ${partResp.status}`);
+    }
+
+    // Get ETag for multipart completion
+    const eTag = partResp.headers.get('etag');
+    eTags.push(eTag);
+    console.log(`UPLOAD: Part ${i + 1} ETag: ${eTag}`);
+  }
+
+  // Complete the upload
+  console.log('UPLOAD: Completing multipart upload...');
   const completeResp = await fetch(
     `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload`,
-    { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ uploadKey: signedData.uploadKey }) }
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploadKey: signedData.uploadKey })
+    }
   );
+
+  console.log(`UPLOAD COMPLETE: Status: ${completeResp.status}`);
   const completeData = await completeResp.json();
-  if (!completeData.objectId) throw new Error('Upload completion failed');
-  return Buffer.from(completeData.objectId).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  console.log('UPLOAD COMPLETE:', JSON.stringify(completeData));
+
+  if (!completeData.objectId) {
+    throw new Error('Upload completion failed - no objectId returned');
+  }
+
+  const urn = Buffer.from(completeData.objectId).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  console.log(`UPLOAD: Success! URN: ${urn.substring(0, 50)}...`);
+  console.log('=== APS UPLOAD END ===\n');
+
+  return urn;
 }
 
 async function translateToSVF2(token, urn) {
-  await fetch('https://developer.api.autodesk.com/modelderivative/v2/designdata/job', {
+  console.log('=== TRANSLATION JOB START ===');
+  console.log('TRANSLATION: Submitting job for URN:', urn.substring(0, 50) + '...');
+
+  const jobResp = await fetch('https://developer.api.autodesk.com/modelderivative/v2/designdata/job', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'x-ads-force': 'true' },
     body: JSON.stringify({
-      input: { urn },
-      output: { formats: [{ type: 'svf2', views: ['2d', '3d'] }] }
+      input: { urn, compressedUrn: false },
+      output: { formats: [{ type: 'svf2', views: ['2d', '3d'] }], destination: { region: 'us' } }
     })
   });
+
+  const jobData = await jobResp.json();
+  console.log('TRANSLATION JOB STATUS:', jobResp.status);
+  console.log('TRANSLATION JOB RESPONSE:', JSON.stringify(jobData, null, 2));
+  console.log('=== TRANSLATION JOB END ===\n');
+
+  if (!jobResp.ok && jobResp.status !== 200 && jobResp.status !== 201) {
+    throw new Error(`Translation job failed: ${jobResp.status} - ${JSON.stringify(jobData)}`);
+  }
 }
 
 async function waitForTranslation(token, urn, maxWait = 900000) { // 15 minutes for large files
+  console.log('=== TRANSLATION POLLING START ===');
   const start = Date.now();
-  let lastProgress = '';
+  let pollCount = 0;
 
   while (Date.now() - start < maxWait) {
-    const resp = await fetch(`https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`, { headers: { 'Authorization': `Bearer ${token}` } });
+    pollCount++;
+    const resp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
     const data = await resp.json();
 
-    const progress = data.progress || 'unknown';
-    if (progress !== lastProgress) {
-      console.log(`Translation: ${progress} (${data.status})`);
-      lastProgress = progress;
+    // Log full poll data
+    console.log(`POLL #${pollCount}:`, JSON.stringify({
+      status: data.status,
+      progress: data.progress,
+      region: data.region,
+      hasSvfDerivative: data.derivatives?.length > 0,
+      derivativeCount: data.derivatives?.length || 0,
+      derivativeStatuses: data.derivatives?.map(d => ({ outputType: d.outputType, status: d.status, progress: d.progress })),
+      messages: data.derivatives?.[0]?.messages
+    }));
+
+    if (data.status === 'success') {
+      console.log('=== TRANSLATION SUCCESS ===\n');
+      return data;
     }
 
-    if (data.status === 'success') return data;
     if (data.status === 'failed') {
+      console.log('=== TRANSLATION FAILED ===');
       const errorMsg = data.derivatives?.find(d => d.status === 'failed')?.messages?.[0]?.message || 'Translation failed';
+      console.log('Error:', errorMsg);
       throw new Error(errorMsg);
     }
 
-    await new Promise(r => setTimeout(r, 3000));
+    // Log elapsed time
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    console.log(`  Elapsed: ${elapsed}s / ${maxWait / 1000}s max`);
+
+    await new Promise(r => setTimeout(r, 5000)); // Poll every 5 seconds
   }
-  throw new Error('Translation timeout - try a smaller file');
+
+  console.log('=== TRANSLATION TIMEOUT ===\n');
+  throw new Error('Translation timeout after 15 minutes');
 }
 
 // ===== APS VECTOR DATA EXTRACTION (NO IMAGES) =====
@@ -856,7 +955,7 @@ app.get('/api/status', (req, res) => {
     status: 'ok',
     aps: APS_CLIENT_ID ? '✅' : '❌',
     claude: ANTHROPIC_API_KEY ? '✅' : '❌',
-    version: '23.0.0-railway'
+    version: '24.0.0-railway'
   });
 });
 
@@ -1045,7 +1144,7 @@ const server = app.listen(PORT, () => {
   console.log(`🔥 Fire Safety Checker running on port ${PORT}`);
   console.log(`   APS: ${APS_CLIENT_ID ? '✅' : '❌'}`);
   console.log(`   Claude: ${ANTHROPIC_API_KEY ? '✅' : '❌'}`);
-  console.log(`   Version: 23.0.0-railway`);
+  console.log(`   Version: 24.0.0-railway`);
   console.log(`   Timeouts: 25min server, 20min analysis, 15min translation`);
 });
 
