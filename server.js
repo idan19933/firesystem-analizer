@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Server v27
+ * Fire Safety Checker - Server v28
  * DXF: Pure vector analysis (direct parsing)
  * DWG: APS upload -> translate -> extract properties -> Claude
- * Fixes: SVF2 derivative check, skip already-translated files
+ * Fixes: Metadata retry after SVF2, fresh token, property 202 handling
  */
 
 const express = require('express');
@@ -267,35 +267,50 @@ async function waitForTranslation(token, urn) {
   throw new Error('Translation timeout');
 }
 
-// ===== APS METADATA EXTRACTION =====
-async function getAPSMetadata(token, urn) {
-  const resp = await fetch(
-    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-  if (!resp.ok) throw new Error(`Metadata failed: ${resp.status}`);
-  return await resp.json();
+// ===== APS METADATA EXTRACTION (with retries) =====
+async function getMetadataWithRetry(token, urn) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const resp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const data = await resp.json();
+    const viewCount = data.data?.metadata?.length || 0;
+    console.log(`   Metadata attempt ${attempt + 1}: status=${resp.status}, views=${viewCount}`);
+
+    if (viewCount > 0) {
+      console.log('METADATA RAW:', JSON.stringify(data, null, 2));
+      return data;
+    }
+
+    console.log('   No views yet, waiting 10s...');
+    await new Promise(r => setTimeout(r, 10000));
+  }
+  throw new Error('Metadata not available after retries');
 }
 
-async function getAPSProperties(token, urn, guid) {
-  // First request may return 202 (still processing)
-  for (let attempt = 0; attempt < 5; attempt++) {
+async function getPropertiesWithRetry(token, urn, guid) {
+  for (let attempt = 0; attempt < 15; attempt++) {
     const resp = await fetch(
       `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}/properties?forceget=true`,
       { headers: { 'Authorization': `Bearer ${token}` } }
     );
+    console.log(`   Properties attempt ${attempt + 1}: status=${resp.status}`);
 
+    if (resp.status === 200) {
+      return await resp.json();
+    }
     if (resp.status === 202) {
-      console.log('   Properties still processing, waiting...');
-      await new Promise(r => setTimeout(r, 3000));
+      console.log('   Properties processing, waiting 15s...');
+      await new Promise(r => setTimeout(r, 15000));
       continue;
     }
 
-    if (!resp.ok) throw new Error(`Properties failed: ${resp.status}`);
-    return await resp.json();
+    const errorText = await resp.text();
+    console.log(`   Properties error: ${resp.status} - ${errorText}`);
+    break;
   }
-
-  throw new Error('Properties extraction timeout');
+  return null;
 }
 
 async function getAPSTree(token, urn, guid) {
@@ -308,10 +323,19 @@ async function getAPSTree(token, urn, guid) {
 }
 
 // ===== EXTRACT ALL APS DATA =====
-async function extractAPSData(token, urn) {
+async function extractAPSData(urn) {
   console.log('📊 Extracting APS data...');
 
-  const metadata = await getAPSMetadata(token, urn);
+  // Wait for metadata indexing after SVF2 completes
+  console.log('   Waiting 10s for metadata indexing...');
+  await new Promise(r => setTimeout(r, 10000));
+
+  // Get fresh token (upload token may have expired)
+  console.log('   Getting fresh token...');
+  const freshToken = await getAPSToken();
+
+  // Get metadata with retry
+  const metadata = await getMetadataWithRetry(freshToken, urn);
   const views = metadata.data?.metadata || [];
   console.log(`   Found ${views.length} views`);
 
@@ -321,19 +345,21 @@ async function extractAPSData(token, urn) {
   for (const view of views) {
     console.log(`   Processing view: ${view.name} (${view.role})`);
 
-    // Get properties
+    // Get properties with retry
     try {
-      const props = await getAPSProperties(token, urn, view.guid);
-      const objects = props.data?.collection || [];
-      allObjects.push(...objects);
-      console.log(`   Objects from ${view.name}: ${objects.length}`);
+      const props = await getPropertiesWithRetry(freshToken, urn, view.guid);
+      if (props) {
+        const objects = props.data?.collection || [];
+        allObjects.push(...objects);
+        console.log(`   Objects from ${view.name}: ${objects.length}`);
+      }
     } catch (e) {
       console.log(`   Properties error: ${e.message}`);
     }
 
     // Get tree structure
     try {
-      const tree = await getAPSTree(token, urn, view.guid);
+      const tree = await getAPSTree(freshToken, urn, view.guid);
       if (tree?.data?.objects) {
         const countTypes = (nodes) => {
           nodes.forEach(n => {
@@ -497,7 +523,7 @@ app.use(express.static('public'));
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '27.0.0',
+    version: '28.0.0',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured'
   });
@@ -577,7 +603,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       const bucketKey = await ensureBucket(token);
       const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
       await translateToSVF2(token, urn);
-      const apsData = await extractAPSData(token, urn);
+      const apsData = await extractAPSData(urn);
       const dwgReport = buildDWGReportText(apsData);
 
       reportText = dwgReport.report;
