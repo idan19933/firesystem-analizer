@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Server v28
+ * Fire Safety Checker - Server v29
  * DXF: Pure vector analysis (direct parsing)
- * DWG: APS upload -> translate -> extract properties -> Claude
- * Fixes: Metadata retry after SVF2, fresh token, property 202 handling
+ * DWG: APS upload -> DELETE old manifest -> fresh translate -> extract
+ * Fixes: Force re-translation by deleting cached broken manifest
  */
 
 const express = require('express');
@@ -186,28 +186,27 @@ async function uploadToAPS(token, bucketKey, filePath, fileName) {
   return urn;
 }
 
-// ===== APS TRANSLATION (with skip-if-already-done) =====
+// ===== APS TRANSLATION (force fresh) =====
 async function translateToSVF2(token, urn) {
-  // BUG FIX #2: Check if already translated
+  // Delete old cached manifest to force re-translation
+  console.log('🗑️ Deleting old cached translation...');
   try {
-    const existingResp = await fetch(
+    const deleteResp = await fetch(
       `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-
-    if (existingResp.ok) {
-      const manifest = await existingResp.json();
-      const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
-      if (svf2 && svf2.status === 'success') {
-        console.log('✅ File already translated - skipping translation job');
-        return manifest;
+      {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
       }
-    }
+    );
+    console.log(`   Delete manifest: ${deleteResp.status}`);
   } catch (e) {
-    // No existing manifest, proceed with translation
+    console.log('   No existing manifest to delete');
   }
 
-  console.log('🔄 Starting translation job...');
+  // Wait for deletion to propagate
+  await new Promise(r => setTimeout(r, 3000));
+
+  console.log('🔄 Submitting fresh translation job...');
   const resp = await fetch('https://developer.api.autodesk.com/modelderivative/v2/designdata/job', {
     method: 'POST',
     headers: {
@@ -523,7 +522,7 @@ app.use(express.static('public'));
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '28.0.0',
+    version: '29.0.0',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured'
   });
