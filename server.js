@@ -225,7 +225,9 @@ async function translateToSVF2(token, urn) {
     throw new Error(`Translation job failed: ${resp.status} - ${error}`);
   }
 
-  return await waitForTranslation(token, urn);
+  const manifest = await waitForTranslation(token, urn);
+  console.log('MANIFEST RAW:', JSON.stringify(manifest));
+  return manifest;
 }
 
 // ===== WAIT FOR TRANSLATION (BUG FIX #1: check SVF2 derivative) =====
@@ -276,9 +278,9 @@ async function getMetadataWithRetry(token, urn) {
     const data = await resp.json();
     const viewCount = data.data?.metadata?.length || 0;
     console.log(`   Metadata attempt ${attempt + 1}: status=${resp.status}, views=${viewCount}`);
+    console.log('   METADATA RAW:', JSON.stringify(data));
 
     if (viewCount > 0) {
-      console.log('METADATA RAW:', JSON.stringify(data, null, 2));
       return data;
     }
 
