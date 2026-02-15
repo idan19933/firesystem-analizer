@@ -1392,8 +1392,14 @@
     }
 
     function displayResults(data) {
+      console.log('=== ANALYSIS RESPONSE ===');
+      console.log('Raw data:', JSON.stringify(data, null, 2));
+      console.log('screenshotUrl:', data.screenshotUrl);
+      console.log('screenshotId:', data.screenshotId);
+      console.log('analysis:', data.analysis);
+
       resultsSection.classList.add('active');
-      const a = data.analysis;
+      const a = data.analysis || {};
 
       // Method badge
       const badgeWrap = document.getElementById('methodBadgeWrap');
@@ -1448,9 +1454,15 @@
       // Image - prefer screenshotUrl (high-res from vision pipeline), fallback to imageUrl
       const imageSection = document.getElementById('imageSection');
       const imgUrl = data.screenshotUrl || data.imageUrl;
+      console.log('Image URL:', imgUrl);
+
       if (imgUrl) {
+        console.log('Showing image section with URL:', imgUrl);
         imageSection.style.display = 'block';
-        document.getElementById('fullImage').src = imgUrl;
+        const fullImg = document.getElementById('fullImage');
+        fullImg.src = imgUrl;
+        fullImg.onerror = () => console.error('Failed to load image:', imgUrl);
+        fullImg.onload = () => console.log('Image loaded successfully');
         document.getElementById('downloadBtn').href = imgUrl;
 
         const badges = document.getElementById('sourceBadges');
