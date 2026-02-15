@@ -1,9 +1,9 @@
 /**
- * Fire Safety Checker - Server v34
- * HYBRID: Local libredwg first, APS fallback
- * DWG: Try dwg2dxf (libredwg) -> if fails, use APS
- * DXF: Direct parsing with dxf-analyzer
- * DWF: Extract from ZIP and parse embedded data
+ * Fire Safety Checker - Server v35
+ * HIGH-RES VISION: Puppeteer captures 4096x4096 screenshot from APS Viewer
+ * Splits into 9 zones + full image -> Claude Vision analysis
+ * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
+ * DXF: Direct parsing (fallback)
  */
 
 const express = require('express');
@@ -16,10 +16,15 @@ const { execSync } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const AdmZip = require('adm-zip');
 
-// DXF Complete Analyzer
+// DXF Analyzer
 const { analyzeDXFComplete } = require('./dxf-analyzer');
 
-// Document parsing libraries
+// Puppeteer and Sharp for high-res capture
+let puppeteer, sharp;
+try { puppeteer = require('puppeteer'); } catch (e) { console.log('Puppeteer not available'); }
+try { sharp = require('sharp'); } catch (e) { console.log('Sharp not available'); }
+
+// Document parsing
 let pdfParse, mammoth, XLSX;
 try { pdfParse = require('pdf-parse'); } catch (e) {}
 try { mammoth = require('mammoth'); } catch (e) {}
@@ -29,7 +34,7 @@ const app = express();
 app.use(express.json());
 app.use(cors({ origin: true, credentials: true }));
 
-// Environment variables
+// Environment
 const APS_CLIENT_ID = process.env.APS_CLIENT_ID;
 const APS_CLIENT_SECRET = process.env.APS_CLIENT_SECRET;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -37,9 +42,15 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Directories
 const tmpDir = os.tmpdir();
 const uploadsDir = path.join(tmpDir, 'uploads');
+const screenshotsDir = path.join(tmpDir, 'screenshots');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: true });
 
-// Multer - accept DWG, DXF, DWF, ZIP
+// Static screenshots directory for serving images
+const publicScreenshotsDir = path.join(__dirname, 'public', 'screenshots');
+if (!fs.existsSync(publicScreenshotsDir)) fs.mkdirSync(publicScreenshotsDir, { recursive: true });
+
+// Multer
 const upload = multer({
   dest: uploadsDir,
   limits: { fileSize: 500 * 1024 * 1024 },
@@ -54,76 +65,44 @@ const instructionUpload = multer({ dest: uploadsDir, limits: { fileSize: 50 * 10
 
 let savedInstructions = [];
 
-// ===== FIRE SAFETY PROMPT =====
-const FIRE_SAFETY_PROMPT = `אתה מומחה בטיחות אש ישראלי. נתח את נתוני תוכנית הבטיחות וצור דוח מקצועי בעברית.
+// ===== FIRE SAFETY VISION PROMPT =====
+const FIRE_SAFETY_VISION_PROMPT = `אתה מומחה בטיחות אש ישראלי. לפניך תוכנית אדריכלית ברזולוציה גבוהה.
 
-הנחיות לניתוח:
-1. בדוק התאמה לתקנות הבטיחות באש הישראליות
-2. בדוק התאמה להוראות נציב כבאות (הנ"כ) 536, 550
-3. בדוק התאמה לתקנים ישראליים: ת"י 1220, ת"י 1596, ת"י 1227
+נתח את התוכנית וזהה:
+1. ספרינקלרים - סמן מיקומים, ספור כמות, בדוק מרחקים
+2. גלאי עשן - זהה סוג וכמות
+3. דלתות אש - בדוק סימון, כיוון פתיחה
+4. יציאות חירום - בדוק סימון, רוחב, נגישות
+5. מטפי כיבוי - מיקום ונגישות
+6. הידרנטים - מיקום פנימי/חיצוני
+7. מדרגות - בדוק הפרדת אש, עישון
+8. קירות אש - זהה עמידות אש
+9. טקסטים בעברית - קרא את כל הכיתובים
 
-קטגוריות: ספרינקלרים, גלאי עשן, גלאי חום, מטפי כיבוי, הידרנטים, דלתות אש, יציאות חירום, מדרגות, קירות אש, מערכות התראה.
+בדוק התאמה ל:
+- הוראות נציב כבאות (הנ"כ) 536, 550
+- תקנים ישראליים: ת"י 1220, ת"י 1596, ת"י 1227
 
-החזר JSON:
+החזר JSON בפורמט:
 {
   "overallScore": 0-100,
   "status": "PASS" | "FAIL" | "NEEDS_REVIEW",
-  "summary": "סיכום קצר",
-  "categories": [{"name": "...", "score": 0-100, "status": "...", "findings": [], "recommendations": []}],
-  "criticalIssues": [],
-  "positiveFindings": [],
+  "summary": "סיכום קצר בעברית",
+  "categories": [
+    {
+      "name": "שם הקטגוריה",
+      "score": 0-100,
+      "status": "PASS/FAIL/NEEDS_REVIEW",
+      "count": "כמות שזוהתה",
+      "findings": ["ממצא 1", "ממצא 2"],
+      "recommendations": ["המלצה 1", "המלצה 2"]
+    }
+  ],
+  "criticalIssues": ["בעיה קריטית 1"],
+  "positiveFindings": ["ממצא חיובי 1"],
+  "hebrewTexts": ["טקסט 1", "טקסט 2"],
   "detailedReport": "דוח מפורט בעברית"
 }`;
-
-// ===== CHECK LIBREDWG AVAILABILITY =====
-function isLibredwgAvailable() {
-  try {
-    execSync('which dwg2dxf || where dwg2dxf 2>&1', { timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-// ===== CONVERT DWG TO DXF USING LIBREDWG =====
-function convertDWGtoDXF(dwgPath) {
-  const dxfPath = dwgPath.replace(/\.dwg$/i, '.dxf');
-
-  console.log('🔄 Converting DWG to DXF using libredwg...');
-
-  try {
-    execSync(`dwg2dxf "${dwgPath}"`, {
-      timeout: 120000,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    if (fs.existsSync(dxfPath)) {
-      const size = fs.statSync(dxfPath).size;
-      console.log(`✅ Converted to DXF: ${(size / 1024 / 1024).toFixed(2)} MB`);
-      return dxfPath;
-    }
-  } catch (err) {
-    console.log(`⚠️ dwg2dxf failed: ${err.message}`);
-  }
-
-  // Try dwgread fallback
-  try {
-    execSync(`dwgread -o "${dxfPath}" "${dwgPath}"`, {
-      timeout: 120000,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    if (fs.existsSync(dxfPath)) {
-      const size = fs.statSync(dxfPath).size;
-      console.log(`✅ Converted with dwgread: ${(size / 1024 / 1024).toFixed(2)} MB`);
-      return dxfPath;
-    }
-  } catch (err2) {
-    console.log(`⚠️ dwgread failed: ${err2.message}`);
-  }
-
-  return null; // Return null to signal fallback to APS
-}
 
 // ===== APS AUTHENTICATION =====
 async function getAPSToken() {
@@ -138,7 +117,7 @@ async function getAPSToken() {
       grant_type: 'client_credentials',
       client_id: APS_CLIENT_ID,
       client_secret: APS_CLIENT_SECRET,
-      scope: 'data:read data:write data:create bucket:read bucket:create'
+      scope: 'data:read data:write data:create bucket:read bucket:create viewables:read'
     })
   });
 
@@ -180,7 +159,7 @@ async function uploadToAPS(token, bucketKey, filePath, fileName) {
   const ext = path.extname(fileName).toLowerCase();
   const safeFileName = `plan_${Date.now()}${ext}`;
 
-  console.log(`📤 Uploading to APS: ${fileName} -> ${safeFileName}`);
+  console.log(`📤 Uploading: ${fileName} -> ${safeFileName} (${(fileSize/1024/1024).toFixed(1)}MB)`);
 
   const PART_SIZE = 5 * 1024 * 1024;
   const numParts = Math.ceil(fileSize / PART_SIZE);
@@ -214,10 +193,7 @@ async function uploadToAPS(token, bucketKey, filePath, fileName) {
     `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload`,
     {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ uploadKey: signedData.uploadKey })
     }
   );
@@ -232,7 +208,6 @@ async function uploadToAPS(token, bucketKey, filePath, fileName) {
 
 // ===== APS TRANSLATION =====
 async function translateToSVF2(token, urn) {
-  // Delete old manifest
   try {
     await fetch(
       `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
@@ -242,7 +217,7 @@ async function translateToSVF2(token, urn) {
 
   await new Promise(r => setTimeout(r, 3000));
 
-  console.log('🔄 Submitting translation job...');
+  console.log('🔄 Submitting SVF2 translation...');
   const resp = await fetch('https://developer.api.autodesk.com/modelderivative/v2/designdata/job', {
     method: 'POST',
     headers: {
@@ -264,7 +239,6 @@ async function translateToSVF2(token, urn) {
   return await waitForTranslation(token, urn);
 }
 
-// ===== WAIT FOR TRANSLATION =====
 async function waitForTranslation(token, urn) {
   const maxWait = 15 * 60 * 1000;
   const start = Date.now();
@@ -283,252 +257,229 @@ async function waitForTranslation(token, urn) {
 
     const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
     if (svf2?.status === 'success') {
-      console.log('✅ SVF2 derivative complete');
+      console.log('✅ SVF2 ready');
       return manifest;
     }
 
     if (manifest.status === 'failed') {
-      const errorMsg = manifest.derivatives?.find(d => d.status === 'failed')?.messages?.[0]?.message || 'Unknown error';
-      throw new Error(`Translation failed: ${errorMsg}`);
+      throw new Error('Translation failed');
     }
 
     const elapsed = Math.round((Date.now() - start) / 1000);
-    console.log(`   Translation: ${manifest.progress || '0%'} (${elapsed}s)`);
+    console.log(`   ${manifest.progress || '0%'} (${elapsed}s)`);
     await new Promise(r => setTimeout(r, 5000));
   }
 
   throw new Error('Translation timeout');
 }
 
-// ===== APS METADATA EXTRACTION =====
-async function extractAPSData(token, urn) {
-  console.log('📊 Extracting APS metadata...');
-
-  // Wait for indexing
-  await new Promise(r => setTimeout(r, 10000));
-
-  // Get fresh token
-  const freshToken = await getAPSToken();
-
-  // Get metadata views (with retry)
-  let views = [];
-  for (let i = 0; i < 12; i++) {
-    const metaResp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
-      { headers: { 'Authorization': `Bearer ${freshToken}` } }
-    );
-    const metadata = await metaResp.json();
-    views = metadata.data?.metadata || [];
-
-    if (views.length > 0) break;
-    console.log(`   Waiting for metadata... (attempt ${i + 1})`);
-    await new Promise(r => setTimeout(r, 10000));
+// ===== HIGH-RES SCREENSHOT WITH PUPPETEER =====
+async function captureHighResScreenshot(token, urn, outputPath) {
+  if (!puppeteer) {
+    throw new Error('Puppeteer not available');
   }
 
-  console.log(`   Found ${views.length} views`);
+  console.log('📸 Capturing high-res screenshot with Puppeteer...');
 
-  if (views.length === 0) {
-    return { objects: [], treeSummary: {}, viewCount: 0 };
-  }
+  const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 
-  const validGuid = views[0].guid;
-  let allObjects = [];
-  let treeSummary = {};
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    executablePath: fs.existsSync(chromePath) ? chromePath : undefined,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--window-size=4096,4096'
+    ]
+  });
 
-  // Get properties (with retry for 202)
-  console.log('   Fetching properties...');
-  for (let attempt = 1; attempt <= 20; attempt++) {
-    const propsResp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}/properties?forceget=true`,
-      { headers: { 'Authorization': `Bearer ${freshToken}` } }
-    );
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 4096, height: 4096 });
 
-    if (propsResp.status === 200) {
-      const propsData = await propsResp.json();
-      allObjects = propsData.data?.collection || [];
-      console.log(`   ✅ Found ${allObjects.length} objects`);
-      break;
-    }
+    const html = `<!DOCTYPE html>
+<html><head>
+  <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css">
+  <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
+  <style>
+    body { margin: 0; overflow: hidden; background: white; }
+    #viewer { width: 100vw; height: 100vh; }
+  </style>
+</head><body>
+  <div id="viewer"></div>
+  <script>
+    window.onerror = function(e) { console.error('Error:', e); };
 
-    if (propsResp.status === 202) {
-      console.log(`   Properties processing... (attempt ${attempt})`);
-      await new Promise(r => setTimeout(r, 15000));
-      continue;
-    }
+    Autodesk.Viewing.Initializer({
+      env: 'AutodeskProduction2',
+      api: 'streamingV2',
+      getAccessToken: function(cb) { cb('${token}', 3600); }
+    }, function() {
+      var viewer = new Autodesk.Viewing.GuiViewer3D(document.getElementById('viewer'), {
+        extensions: ['Autodesk.DocumentBrowser']
+      });
+      viewer.start();
 
-    break;
-  }
+      Autodesk.Viewing.Document.load('urn:${urn}', function(doc) {
+        var views = doc.getRoot().search({ type: 'geometry', role: '2d' });
+        if (!views.length) views = doc.getRoot().search({ type: 'geometry', role: '3d' });
 
-  // Get tree (with retry for 202)
-  console.log('   Fetching object tree...');
-  for (let attempt = 1; attempt <= 20; attempt++) {
-    const treeResp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}?forceget=true`,
-      { headers: { 'Authorization': `Bearer ${freshToken}` } }
-    );
+        if (views.length) {
+          viewer.loadDocumentNode(doc, views[0]).then(function() {
+            viewer.addEventListener(Autodesk.Viewing.GEOMETRY_LOADED_EVENT, function() {
+              viewer.fitToView();
+              viewer.setBackgroundColor(255, 255, 255, 255, 255, 255);
+              viewer.navigation.setZoomTowardsPivot(false);
 
-    if (treeResp.status === 200) {
-      const treeData = await treeResp.json();
-      if (treeData?.data?.objects) {
-        const countTypes = (nodes) => {
-          nodes.forEach(n => {
-            treeSummary[n.name] = (treeSummary[n.name] || 0) + 1;
-            if (n.objects) countTypes(n.objects);
+              setTimeout(function() {
+                document.title = 'READY';
+              }, 5000);
+            });
           });
-        };
-        countTypes(treeData.data.objects);
-      }
-      break;
+        } else {
+          document.title = 'NO_VIEWS';
+        }
+      }, function(err) {
+        console.error('Load error:', err);
+        document.title = 'ERROR';
+      });
+    });
+  </script>
+</body></html>`;
+
+    await page.setContent(html);
+
+    console.log('   Waiting for viewer to load...');
+    await page.waitForFunction(
+      () => document.title === 'READY' || document.title === 'NO_VIEWS' || document.title === 'ERROR',
+      { timeout: 180000 }
+    );
+
+    const title = await page.title();
+    if (title === 'ERROR' || title === 'NO_VIEWS') {
+      throw new Error(`Viewer failed: ${title}`);
     }
 
-    if (treeResp.status === 202) {
-      console.log(`   Tree processing... (attempt ${attempt})`);
-      await new Promise(r => setTimeout(r, 15000));
-      continue;
-    }
+    // Extra wait for rendering
+    await new Promise(r => setTimeout(r, 3000));
 
-    break;
+    console.log('   Taking screenshot...');
+    const screenshot = await page.screenshot({ type: 'png', fullPage: false });
+
+    fs.writeFileSync(outputPath, screenshot);
+    const size = fs.statSync(outputPath).size;
+    console.log(`✅ Screenshot saved: ${(size/1024/1024).toFixed(2)}MB`);
+
+    return screenshot;
+  } finally {
+    await browser.close();
+  }
+}
+
+// ===== SPLIT INTO 9 ZONES =====
+async function splitIntoZones(imageBuffer) {
+  if (!sharp) {
+    throw new Error('Sharp not available');
   }
 
-  return { objects: allObjects, treeSummary, viewCount: views.length };
+  console.log('🔲 Splitting image into 9 zones...');
+
+  const meta = await sharp(imageBuffer).metadata();
+  const zoneWidth = Math.floor(meta.width / 3);
+  const zoneHeight = Math.floor(meta.height / 3);
+
+  const zones = [];
+
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const zone = await sharp(imageBuffer)
+        .extract({
+          left: col * zoneWidth,
+          top: row * zoneHeight,
+          width: zoneWidth,
+          height: zoneHeight
+        })
+        .png()
+        .toBuffer();
+
+      zones.push(zone);
+      console.log(`   Zone ${row * 3 + col + 1}/9 ✓`);
+    }
+  }
+
+  return zones;
 }
 
-// ===== BUILD APS REPORT TEXT =====
-function buildAPSReportText(apsData) {
-  const { objects, treeSummary, viewCount } = apsData;
+// ===== CLAUDE VISION ANALYSIS =====
+async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY not configured');
+  }
 
-  const categories = {
-    sprinklers: [], smokeDetectors: [], fireDoors: [], exits: [],
-    fireExtinguishers: [], hydrants: [], texts: [], blocks: [], other: []
+  console.log('🤖 Sending to Claude Vision (10 images)...');
+
+  // Build image array: full image + 9 zones
+  const images = [fullImage, ...zones].map(buf => ({
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: "image/png",
+      data: buf.toString('base64')
+    }
+  }));
+
+  const textContent = {
+    type: "text",
+    text: `${customPrompt || FIRE_SAFETY_VISION_PROMPT}
+
+התמונה הראשונה היא התוכנית המלאה ברזולוציה גבוהה.
+9 התמונות הבאות הן זומים על אזורים שונים בתוכנית (רשת 3x3) לקריאת פרטים.
+
+נתח את כל התמונות ביחד וצור דוח מקיף.`
   };
 
-  const patterns = {
-    sprinklers: /sprink|ספרינק|מתז|head/i,
-    smokeDetectors: /smoke|detector|גלאי|עשן/i,
-    fireDoors: /fire.?door|דלת.?אש/i,
-    exits: /exit|יציאה|מוצא/i,
-    fireExtinguishers: /extinguisher|מטף/i,
-    hydrants: /hydrant|הידרנט|ברז/i
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 8000,
+      messages: [{
+        role: 'user',
+        content: [...images, textContent]
+      }]
+    })
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Claude API error: ${resp.status} - ${err}`);
+  }
+
+  const data = await resp.json();
+  const content = data.content[0].text;
+
+  console.log('✅ Vision analysis complete');
+
+  try {
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    console.log('   JSON parse failed, returning raw');
+  }
+
+  return {
+    overallScore: 50,
+    status: 'NEEDS_REVIEW',
+    summary: 'ניתוח ויזואלי',
+    detailedReport: content
   };
-
-  objects.forEach(obj => {
-    const name = obj.name || '';
-    const props = obj.properties || {};
-    let categorized = false;
-
-    for (const [cat, pattern] of Object.entries(patterns)) {
-      if (pattern.test(name) || pattern.test(JSON.stringify(props))) {
-        categories[cat].push({ name, props });
-        categorized = true;
-        break;
-      }
-    }
-
-    if (!categorized) {
-      if (/text|mtext/i.test(name)) categories.texts.push({ name, props });
-      else if (/block|insert/i.test(name)) categories.blocks.push({ name, props });
-      else categories.other.push({ name, props });
-    }
-  });
-
-  let report = `=== נתוני DWG מ-APS ===
-
-סיכום:
-- אובייקטים: ${objects.length}
-- תצוגות: ${viewCount}
-
-מבנה:
-${Object.entries(treeSummary).slice(0, 20).map(([k, v]) => `  - ${k}: ${v}`).join('\n')}
-
-=== מערכות בטיחות אש ===
-ספרינקלרים: ${categories.sprinklers.length}
-גלאי עשן: ${categories.smokeDetectors.length}
-דלתות אש: ${categories.fireDoors.length}
-יציאות חירום: ${categories.exits.length}
-מטפי כיבוי: ${categories.fireExtinguishers.length}
-הידרנטים: ${categories.hydrants.length}
-
-=== טקסטים ===
-${categories.texts.slice(0, 50).map(t => `- ${t.name}`).join('\n')}
-
-=== בלוקים ===
-${categories.blocks.slice(0, 50).map(b => `- ${b.name}`).join('\n')}
-`;
-
-  return { report, categories };
-}
-
-// ===== EXTRACT DWF =====
-function extractDWF(dwfPath) {
-  console.log('📦 Extracting DWF...');
-
-  const zip = new AdmZip(dwfPath);
-  const entries = zip.getEntries();
-
-  let extractedData = { manifest: null, sections: [], graphics: [], texts: [] };
-
-  entries.forEach(entry => {
-    const name = entry.entryName;
-
-    if (name.toLowerCase().includes('manifest') && name.endsWith('.xml')) {
-      extractedData.manifest = entry.getData().toString('utf8');
-    }
-
-    if (name.endsWith('.xml') && !name.includes('manifest')) {
-      try {
-        const content = entry.getData().toString('utf8');
-        extractedData.sections.push({ name, content });
-        const textMatches = content.match(/<Text[^>]*>([^<]+)<\/Text>/gi) || [];
-        textMatches.forEach(match => {
-          const text = match.replace(/<[^>]+>/g, '').trim();
-          if (text.length > 0) extractedData.texts.push(text);
-        });
-      } catch (e) {}
-    }
-
-    if (name.match(/\.(w2d|f2d)$/i)) {
-      extractedData.graphics.push({ name, size: entry.header.size });
-    }
-  });
-
-  return extractedData;
-}
-
-// ===== BUILD DWF REPORT =====
-function buildDWFReportText(dwfData) {
-  const fireSafety = {
-    sprinklers: 0, smokeDetectors: 0, exits: 0,
-    fireDoors: 0, extinguishers: 0, hydrants: 0
-  };
-
-  dwfData.texts.forEach(text => {
-    const lower = text.toLowerCase();
-    if (/sprink|ספרינק|מתז/.test(lower)) fireSafety.sprinklers++;
-    if (/smoke|גלאי|עשן/.test(lower)) fireSafety.smokeDetectors++;
-    if (/exit|יציאה|מוצא/.test(lower)) fireSafety.exits++;
-    if (/fire.?door|דלת.?אש/.test(lower)) fireSafety.fireDoors++;
-    if (/extinguisher|מטף/.test(lower)) fireSafety.extinguishers++;
-    if (/hydrant|הידרנט|ברז.?כיבוי/.test(lower)) fireSafety.hydrants++;
-  });
-
-  let report = `=== נתוני DWF ===
-גרפיקה: ${dwfData.graphics.length}
-סקשנים: ${dwfData.sections.length}
-טקסטים: ${dwfData.texts.length}
-
-=== טקסטים ===
-${dwfData.texts.slice(0, 100).join('\n')}
-
-=== בטיחות אש ===
-ספרינקלרים: ${fireSafety.sprinklers}
-גלאי עשן: ${fireSafety.smokeDetectors}
-יציאות: ${fireSafety.exits}
-דלתות אש: ${fireSafety.fireDoors}
-מטפים: ${fireSafety.extinguishers}
-הידרנטים: ${fireSafety.hydrants}
-`;
-
-  return { report, fireSafety };
 }
 
 // ===== EXTRACT FROM ZIP =====
@@ -546,19 +497,18 @@ function extractFromZip(filePath, originalName) {
     return ['.dwg', '.dxf', '.dwf'].includes(eExt);
   });
 
-  if (!cadEntry) throw new Error('ZIP does not contain DWG, DXF, or DWF file');
+  if (!cadEntry) throw new Error('ZIP does not contain CAD file');
 
   const extractedName = path.basename(cadEntry.entryName);
   const extractedPath = path.join(tmpDir, `extracted_${Date.now()}_${extractedName}`);
   fs.writeFileSync(extractedPath, cadEntry.getData());
 
-  console.log(`✅ Extracted: ${extractedName}`);
   return { filePath: extractedPath, originalName: extractedName };
 }
 
-// ===== GENERATE REPORT WITH CLAUDE =====
-async function generateReport(reportText, customPrompt = null) {
-  if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not configured');
+// ===== DXF FALLBACK =====
+async function analyzeDXFWithClaude(filePath, customPrompt) {
+  const analysis = await analyzeDXFComplete(filePath);
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -572,7 +522,7 @@ async function generateReport(reportText, customPrompt = null) {
       max_tokens: 8000,
       messages: [{
         role: 'user',
-        content: `${customPrompt || FIRE_SAFETY_PROMPT}\n\n=== נתוני התוכנית ===\n${reportText}`
+        content: `${customPrompt || FIRE_SAFETY_VISION_PROMPT}\n\n=== נתוני DXF ===\n${analysis.reportText}`
       }]
     })
   });
@@ -583,10 +533,13 @@ async function generateReport(reportText, customPrompt = null) {
 
   try {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+    if (jsonMatch) return { report: JSON.parse(jsonMatch[0]), analysis };
   } catch (e) {}
 
-  return { overallScore: 50, status: 'NEEDS_REVIEW', summary: 'ניתוח חלקי', detailedReport: content };
+  return {
+    report: { overallScore: 50, status: 'NEEDS_REVIEW', detailedReport: content },
+    analysis
+  };
 }
 
 // ===== STATIC FILES =====
@@ -596,11 +549,12 @@ app.use(express.static('public'));
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '34.0.0',
-    libredwg: isLibredwgAvailable() ? 'installed' : 'not installed',
-    aps: APS_CLIENT_ID ? 'configured (fallback)' : 'not configured',
+    version: '35.0.0',
+    puppeteer: puppeteer ? 'available' : 'not installed',
+    sharp: sharp ? 'available' : 'not installed',
+    aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured',
-    mode: 'Hybrid: libredwg primary, APS fallback'
+    mode: 'High-Res Vision Analysis'
   });
 });
 
@@ -611,10 +565,6 @@ app.post('/api/upload-instructions', instructionUpload.single('instructionFile')
     let content = '';
     if (ext === '.pdf' && pdfParse) content = (await pdfParse(fs.readFileSync(req.file.path))).text;
     else if ((ext === '.docx' || ext === '.doc') && mammoth) content = (await mammoth.extractRawText({ path: req.file.path })).value;
-    else if ((ext === '.xlsx' || ext === '.xls') && XLSX) {
-      const workbook = XLSX.readFile(req.file.path);
-      content = workbook.SheetNames.map(name => XLSX.utils.sheet_to_csv(workbook.Sheets[name])).join('\n\n');
-    }
     else content = fs.readFileSync(req.file.path, 'utf8');
 
     const instruction = { id: uuidv4(), name: req.body.name || req.file.originalname, content, createdAt: new Date().toISOString() };
@@ -639,12 +589,13 @@ app.delete('/api/instructions/:id', (req, res) => {
 app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
   const startTime = Date.now();
   let tempFiles = [];
+  let screenshotUrl = null;
 
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     console.log('\n========================================');
-    console.log('🔥 FIRE SAFETY ANALYSIS v34 (Hybrid)');
+    console.log('🔥 FIRE SAFETY ANALYSIS v35 (Vision)');
     console.log(`📁 ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)}MB)`);
     console.log('========================================\n');
 
@@ -654,115 +605,86 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     let { filePath, originalName } = extractFromZip(req.file.path, req.file.originalname);
     if (filePath !== req.file.path) tempFiles.push(filePath);
 
-    let ext = path.extname(originalName).toLowerCase();
-    let reportText, analysisData;
+    const ext = path.extname(originalName).toLowerCase();
+    let report, analysisData;
 
-    // ===== DWG: Try libredwg first, then APS fallback =====
-    if (ext === '.dwg') {
-      console.log('📐 DWG detected');
-
-      // Try libredwg first
-      if (isLibredwgAvailable()) {
-        console.log('   Trying libredwg conversion...');
-        const dxfPath = convertDWGtoDXF(filePath);
-
-        if (dxfPath) {
-          tempFiles.push(dxfPath);
-          console.log('   ✅ Libredwg succeeded, parsing DXF...');
-          const analysis = await analyzeDXFComplete(dxfPath);
-          reportText = analysis.reportText;
-          analysisData = {
-            method: 'libredwg + DXF Parsing',
-            entities: analysis.parsed.totalEntities,
-            layers: Object.keys(analysis.tree.layers).length,
-            texts: analysis.parsed.texts.length,
-            fireSafety: analysis.reportData.fireSafety
-          };
-        }
-      }
-
-      // APS fallback if libredwg failed or unavailable
-      if (!reportText) {
-        if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
-          throw new Error('libredwg failed and APS not configured. Cannot process DWG file.');
-        }
-
-        console.log('   ⚠️ Libredwg unavailable/failed, using APS fallback...');
-        const token = await getAPSToken();
-        const bucketKey = await ensureBucket(token);
-        const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
-        await translateToSVF2(token, urn);
-        const apsData = await extractAPSData(token, urn);
-        const apsReport = buildAPSReportText(apsData);
-
-        reportText = apsReport.report;
-        analysisData = {
-          method: 'APS Cloud Extraction',
-          objects: apsData.objects.length,
-          views: apsData.viewCount,
-          fireSafety: {
-            sprinklers: { count: apsReport.categories.sprinklers.length },
-            smokeDetectors: { count: apsReport.categories.smokeDetectors.length },
-            fireDoors: { count: apsReport.categories.fireDoors.length },
-            exits: { count: apsReport.categories.exits.length }
-          }
-        };
-      }
-    }
-
-    // ===== DXF: Direct parsing =====
-    else if (ext === '.dxf') {
-      console.log('📐 Parsing DXF...');
-      const analysis = await analyzeDXFComplete(filePath);
-      reportText = analysis.reportText;
-      analysisData = {
-        method: 'DXF Vector Parsing',
-        entities: analysis.parsed.totalEntities,
-        layers: Object.keys(analysis.tree.layers).length,
-        texts: analysis.parsed.texts.length,
-        fireSafety: analysis.reportData.fireSafety
-      };
-    }
-
-    // ===== DWF: Extract and parse =====
-    else if (ext === '.dwf') {
-      console.log('📦 Extracting DWF...');
-      const dwfData = extractDWF(filePath);
-      const dwfReport = buildDWFReportText(dwfData);
-      reportText = dwfReport.report;
-      analysisData = {
-        method: 'DWF Extraction',
-        graphics: dwfData.graphics.length,
-        sections: dwfData.sections.length,
-        texts: dwfData.texts.length,
-        fireSafety: dwfReport.fireSafety
-      };
-    }
-
-    else {
-      throw new Error('Unsupported format. Use DWG, DXF, or DWF.');
-    }
-
-    // Generate Claude report
-    console.log('\n🤖 Generating Claude report...');
+    // Get custom prompt if specified
     let customPrompt = null;
     if (req.body.instructionId && req.body.instructionId !== 'fire-safety') {
       const instr = savedInstructions.find(i => i.id === req.body.instructionId);
       if (instr) customPrompt = instr.content;
     }
 
-    const report = await generateReport(reportText, customPrompt);
+    // ===== DWG/DWF: High-Res Vision Pipeline =====
+    if ((ext === '.dwg' || ext === '.dwf') && puppeteer && sharp && APS_CLIENT_ID) {
+      console.log('🎯 Using High-Res Vision Pipeline');
+
+      // APS Upload & Translate
+      const token = await getAPSToken();
+      const bucketKey = await ensureBucket(token);
+      const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
+      await translateToSVF2(token, urn);
+
+      // Get fresh token for viewer
+      const viewerToken = await getAPSToken();
+
+      // Capture high-res screenshot
+      const screenshotId = uuidv4();
+      const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+      const fullImage = await captureHighResScreenshot(viewerToken, urn, screenshotPath);
+
+      // Set URL for frontend
+      screenshotUrl = `/screenshots/${screenshotId}.png`;
+
+      // Split into zones
+      const zones = await splitIntoZones(fullImage);
+
+      // Analyze with Claude Vision
+      report = await analyzeWithClaudeVision(fullImage, zones, customPrompt);
+
+      analysisData = {
+        method: 'High-Res Vision (4096x4096)',
+        screenshotUrl,
+        zones: 9,
+        imagesAnalyzed: 10
+      };
+    }
+
+    // ===== DXF: Direct parsing =====
+    else if (ext === '.dxf') {
+      console.log('📐 Using DXF parsing pipeline');
+
+      const result = await analyzeDXFWithClaude(filePath, customPrompt);
+      report = result.report;
+
+      analysisData = {
+        method: 'DXF Vector Parsing',
+        entities: result.analysis.parsed.totalEntities,
+        layers: Object.keys(result.analysis.tree.layers).length,
+        texts: result.analysis.parsed.texts.length
+      };
+    }
+
+    // ===== Fallback for DWG without Vision =====
+    else if (ext === '.dwg' || ext === '.dwf') {
+      throw new Error('Vision pipeline requires Puppeteer and APS. Use DXF format instead.');
+    }
+
+    else {
+      throw new Error('Unsupported format. Use DWG, DXF, or DWF.');
+    }
 
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n✅ Complete in ${totalTime}s - Score: ${report.overallScore}`);
 
-    // Cleanup
+    // Cleanup temp files (but keep screenshot)
     tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 
     res.json({
       success: true,
       fileName: originalName,
       analysisTime: totalTime,
+      screenshotUrl,
       analysis: analysisData,
       report
     });
@@ -777,17 +699,17 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 // ===== START SERVER =====
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
-  const libredwg = isLibredwgAvailable();
-
   console.log('\n========================================');
-  console.log('🔥 FIRE SAFETY CHECKER v34 (Hybrid)');
+  console.log('🔥 FIRE SAFETY CHECKER v35 (Vision)');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
-  console.log(`📐 DXF: Direct vector parsing`);
-  console.log(`🔄 DWG Primary: libredwg (${libredwg ? '✅ installed' : '❌ not installed'})`);
-  console.log(`☁️  DWG Fallback: APS (${APS_CLIENT_ID ? '✅ configured' : '❌ not configured'})`);
-  console.log(`📦 DWF: ZIP extraction`);
+  console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
+  console.log(`🖼️  Sharp: ${sharp ? '✅ ready' : '❌ not installed'}`);
+  console.log(`☁️  APS: ${APS_CLIENT_ID ? '✅ configured' : '❌ not configured'}`);
   console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? '✅ ready' : '❌ not configured'}`);
+  console.log('========================================');
+  console.log('📐 DWG/DWF: APS → Puppeteer → 4096px → Vision');
+  console.log('📄 DXF: Direct parsing → Claude');
   console.log('========================================\n');
 });
 

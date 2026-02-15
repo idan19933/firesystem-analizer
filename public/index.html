@@ -879,7 +879,7 @@
     <div class="logo">🔥</div>
     <h1>FireCheck Pro</h1>
     <p>בדיקת בטיחות אש חכמה לתוכניות אדריכליות</p>
-    <span class="version-badge">גרסה 12 - וקטורי + AI</span>
+    <span class="version-badge">גרסה 35 - רזולוציה גבוהה + AI</span>
   </header>
 
   <div class="container">
@@ -1350,6 +1350,9 @@
       if (data.analysisMethod === 'vector') {
         badge.className = 'method-badge vector';
         badge.innerHTML = '🔷 ניתוח וקטורי (DXF)';
+      } else if (data.analysisMethod === 'vision-high-res' || data.screenshotUrl) {
+        badge.className = 'method-badge vision';
+        badge.innerHTML = '🧠 ניתוח AI רזולוציה גבוהה (10 תמונות)';
       } else {
         badge.className = 'method-badge vision';
         badge.innerHTML = '🧠 ניתוח AI (Claude Vision)';
@@ -1390,18 +1393,24 @@
         vectorSection.style.display = 'none';
       }
 
-      // Image
+      // Image - prefer screenshotUrl (high-res from vision pipeline), fallback to imageUrl
       const imageSection = document.getElementById('imageSection');
-      if (data.imageUrl) {
+      const imgUrl = data.screenshotUrl || data.imageUrl;
+      if (imgUrl) {
         imageSection.style.display = 'block';
-        document.getElementById('fullImage').src = data.imageUrl;
-        document.getElementById('downloadBtn').href = data.imageUrl;
+        document.getElementById('fullImage').src = imgUrl;
+        document.getElementById('downloadBtn').href = imgUrl;
 
         const badges = document.getElementById('sourceBadges');
-        const srcClass = data.sourceType === 'vector-dxf' ? 'vector' : (data.sourceType === 'derivative' ? 'derivative' : 'thumbnail');
-        const srcLabel = data.sourceType === 'vector-dxf' ? 'רנדור וקטורי' : (data.sourceType === 'derivative' ? 'מקור' : 'תמונה');
-        badges.innerHTML = '<span class="source-badge ' + srcClass + '">' + srcLabel + '</span>';
-        if (data.outputDimensions) badges.innerHTML += '<span class="source-badge thumbnail">' + data.outputDimensions + '</span>';
+        if (data.screenshotUrl) {
+          // High-res screenshot from vision pipeline
+          badges.innerHTML = '<span class="source-badge derivative">רזולוציה גבוהה</span><span class="source-badge thumbnail">4096×4096</span>';
+        } else {
+          const srcClass = data.sourceType === 'vector-dxf' ? 'vector' : (data.sourceType === 'derivative' ? 'derivative' : 'thumbnail');
+          const srcLabel = data.sourceType === 'vector-dxf' ? 'רנדור וקטורי' : (data.sourceType === 'derivative' ? 'מקור' : 'תמונה');
+          badges.innerHTML = '<span class="source-badge ' + srcClass + '">' + srcLabel + '</span>';
+          if (data.outputDimensions) badges.innerHTML += '<span class="source-badge thumbnail">' + data.outputDimensions + '</span>';
+        }
       } else {
         imageSection.style.display = 'none';
       }

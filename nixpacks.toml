@@ -1,5 +1,28 @@
 # Nixpacks configuration for Railway
-# libredwg-utils provides dwg2dxf for DWG->DXF conversion
+# libredwg-tools: DWG->DXF conversion
+# Chromium deps: Required for Puppeteer headless browser
 
 [phases.setup]
-aptPkgs = ["libredwg-tools"]
+aptPkgs = [
+  "libredwg-tools",
+  "chromium",
+  "libx11-xcb1",
+  "libxcomposite1",
+  "libxdamage1",
+  "libxrandr2",
+  "libgbm1",
+  "libasound2",
+  "libpangocairo-1.0-0",
+  "libatk1.0-0",
+  "libatk-bridge2.0-0",
+  "libcups2",
+  "libdrm2",
+  "libxkbcommon0",
+  "libxshmfence1",
+  "libnss3",
+  "libnspr4"
+]
+
+[variables]
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
+PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"

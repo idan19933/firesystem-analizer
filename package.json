@@ -1,7 +1,7 @@
 {
   "name": "fire-safety-checker",
-  "version": "34.0.0",
-  "description": "Fire Safety Plan Checker - DXF Vector Analysis",
+  "version": "35.0.0",
+  "description": "Fire Safety Plan Checker - High-Res Vision Analysis",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -18,6 +18,8 @@
     "uuid": "^9.0.0",
     "pdf-parse": "^1.1.1",
     "mammoth": "^1.6.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "puppeteer": "^21.0.0",
+    "sharp": "^0.33.0"
   }
 }
