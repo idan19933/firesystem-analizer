@@ -740,14 +740,33 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     // Extract screenshotId from URL for zone requests
     const screenshotId = screenshotUrl ? screenshotUrl.replace('/screenshots/', '').replace('.png', '') : null;
 
+    // Build response matching frontend expectations
+    // Frontend reads: data.analysis.overallScore, data.analysis.categories, etc.
+    // Frontend reads: data.filename (lowercase), data.processingTime
     res.json({
       success: true,
-      fileName: originalName,
+      filename: originalName,
+      fileName: originalName,  // Keep both for compatibility
+      processingTime: `${totalTime}s`,
       analysisTime: totalTime,
       screenshotUrl,
       screenshotId,
-      analysis: analysisData,
-      report
+      analysisMethod: analysisData.method?.includes('Vision') ? 'vision-high-res' : 'vector',
+      // Put the report data in 'analysis' field - this is what frontend reads
+      analysis: {
+        overallScore: report.overallScore || 0,
+        overallStatus: report.status || report.overallStatus || 'NEEDS_REVIEW',
+        buildingType: report.buildingType || '',
+        categories: report.categories || [],
+        criticalIssues: report.criticalIssues || [],
+        positiveFindings: report.positiveFindings || [],
+        summary: report.summary || report.detailedReport || '',
+        summaryHe: report.summaryHe || report.summary || report.detailedReport || '',
+        hebrewTexts: report.hebrewTexts || []
+      },
+      // Keep raw data for debugging
+      metadata: analysisData,
+      rawReport: report
     });
 
   } catch (error) {
