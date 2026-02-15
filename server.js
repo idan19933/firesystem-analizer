@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Server v31
+ * Fire Safety Checker - Server v32
  * DXF: Pure vector analysis (direct parsing)
  * DWG/DWF: APS upload -> translate -> extract properties -> Claude
- * Fixes: Multi-GUID extraction (try all GUIDs from metadata AND manifest)
+ * Fixes: Retry 202 status for properties/tree (wait 15s, up to 20 attempts)
  */
 
 const express = require('express');
@@ -374,44 +374,67 @@ async function extractAPSData(urn, manifest) {
   console.log(`   Found ${views.length} views from metadata`);
   console.log('   Available views:', JSON.stringify(views));
 
-  // Collect all GUIDs to try (from metadata AND manifest)
-  const guidsToTry = new Set();
-
-  // Add metadata GUIDs
-  views.forEach(v => guidsToTry.add(v.guid));
-
-  // Add geometry GUIDs from manifest
-  const svf2 = manifest?.derivatives?.find(d => d.outputType === 'svf2');
-  if (svf2?.children) {
-    svf2.children.forEach(child => {
-      if (child.guid) guidsToTry.add(child.guid);
-      if (child.children) {
-        child.children.forEach(c => {
-          if (c.guid) guidsToTry.add(c.guid);
-        });
-      }
-    });
+  if (views.length === 0) {
+    console.log('❌ No views found in metadata');
+    return { objects: [], treeSummary: {}, viewCount: 0 };
   }
 
-  console.log(`   Total GUIDs to try: ${guidsToTry.size}`);
+  // Use only the GUID from metadata (not manifest GUIDs - those are resource IDs)
+  const validGuid = views[0].guid;
+  console.log(`\n🎯 Using metadata GUID: ${validGuid}`);
 
   let allObjects = [];
   let treeSummary = {};
 
-  for (const guid of guidsToTry) {
-    console.log(`\n=== Trying GUID: ${guid} ===`);
-
-    // Try object tree
+  // Retry properties with 202 handling (up to 20 attempts, 15s each = 5 min max)
+  console.log('\n📋 Fetching properties (with retry for 202)...');
+  for (let attempt = 1; attempt <= 20; attempt++) {
     try {
-      const treeResp = await fetch(
-        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}?forceget=true`,
+      const propsResp = await fetch(
+        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}/properties?forceget=true`,
         { headers: { 'Authorization': `Bearer ${freshToken}` } }
       );
-      console.log(`   Tree status: ${treeResp.status}`);
+      console.log(`   Properties attempt ${attempt}: status=${propsResp.status}`);
 
-      if (treeResp.ok) {
+      if (propsResp.status === 200) {
+        const propsData = await propsResp.json();
+        const objects = propsData.data?.collection || [];
+        console.log(`   ✅ Objects found: ${objects.length}`);
+        if (objects.length > 0) {
+          console.log(`   First 3: ${JSON.stringify(objects.slice(0, 3))}`);
+          allObjects = objects;
+        }
+        break; // Success, exit retry loop
+      }
+
+      if (propsResp.status === 202) {
+        console.log('   ⏳ Still processing, waiting 15s...');
+        await new Promise(r => setTimeout(r, 15000));
+        continue; // Retry
+      }
+
+      // Other status (404, 500, etc.) - stop retrying
+      console.log(`   ❌ Unexpected status ${propsResp.status}, stopping`);
+      break;
+    } catch (e) {
+      console.log(`   ❌ Props error: ${e.message}`);
+      break;
+    }
+  }
+
+  // Retry tree with 202 handling
+  console.log('\n🌳 Fetching object tree (with retry for 202)...');
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    try {
+      const treeResp = await fetch(
+        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}?forceget=true`,
+        { headers: { 'Authorization': `Bearer ${freshToken}` } }
+      );
+      console.log(`   Tree attempt ${attempt}: status=${treeResp.status}`);
+
+      if (treeResp.status === 200) {
         const treeData = await treeResp.json();
-        console.log(`   Tree data: ${JSON.stringify(treeData).slice(0, 500)}...`);
+        console.log(`   ✅ Tree data received`);
 
         if (treeData?.data?.objects) {
           const countTypes = (nodes) => {
@@ -421,39 +444,26 @@ async function extractAPSData(urn, manifest) {
             });
           };
           countTypes(treeData.data.objects);
+          console.log(`   Tree summary: ${JSON.stringify(treeSummary)}`);
         }
+        break; // Success
       }
-    } catch (e) {
-      console.log(`   Tree error: ${e.message}`);
-    }
 
-    // Try properties
-    try {
-      const propsResp = await fetch(
-        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}/properties?forceget=true`,
-        { headers: { 'Authorization': `Bearer ${freshToken}` } }
-      );
-      console.log(`   Props status: ${propsResp.status}`);
-
-      if (propsResp.status === 200) {
-        const propsData = await propsResp.json();
-        const objects = propsData.data?.collection || [];
-        console.log(`   Props objects: ${objects.length}`);
-
-        if (objects.length > 0) {
-          console.log(`   First 3 objects: ${JSON.stringify(objects.slice(0, 3))}`);
-          allObjects.push(...objects);
-        }
-      } else if (propsResp.status === 202) {
-        console.log('   Props still processing...');
+      if (treeResp.status === 202) {
+        console.log('   ⏳ Still processing, waiting 15s...');
+        await new Promise(r => setTimeout(r, 15000));
+        continue;
       }
+
+      console.log(`   ❌ Unexpected status ${treeResp.status}, stopping`);
+      break;
     } catch (e) {
-      console.log(`   Props error: ${e.message}`);
+      console.log(`   ❌ Tree error: ${e.message}`);
+      break;
     }
   }
 
   console.log(`\n✅ Total objects extracted: ${allObjects.length}`);
-  console.log(`   Tree summary: ${JSON.stringify(treeSummary)}`);
   return { objects: allObjects, treeSummary, viewCount: views.length };
 }
 
