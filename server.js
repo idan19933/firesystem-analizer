@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Server v30
+ * Fire Safety Checker - Server v31
  * DXF: Pure vector analysis (direct parsing)
  * DWG/DWF: APS upload -> translate -> extract properties -> Claude
- * Fixes: ASCII filename for APS (Hebrew was corrupting), DWF support
+ * Fixes: Multi-GUID extraction (try all GUIDs from metadata AND manifest)
  */
 
 const express = require('express');
@@ -357,56 +357,103 @@ async function getAPSTree(token, urn, guid) {
 }
 
 // ===== EXTRACT ALL APS DATA =====
-async function extractAPSData(urn) {
+async function extractAPSData(urn, manifest) {
   console.log('📊 Extracting APS data...');
 
-  // Wait for metadata indexing after SVF2 completes
+  // Wait for metadata indexing
   console.log('   Waiting 10s for metadata indexing...');
   await new Promise(r => setTimeout(r, 10000));
 
-  // Get fresh token (upload token may have expired)
+  // Get fresh token
   console.log('   Getting fresh token...');
   const freshToken = await getAPSToken();
 
   // Get metadata with retry
   const metadata = await getMetadataWithRetry(freshToken, urn);
   const views = metadata.data?.metadata || [];
-  console.log(`   Found ${views.length} views`);
+  console.log(`   Found ${views.length} views from metadata`);
+  console.log('   Available views:', JSON.stringify(views));
+
+  // Collect all GUIDs to try (from metadata AND manifest)
+  const guidsToTry = new Set();
+
+  // Add metadata GUIDs
+  views.forEach(v => guidsToTry.add(v.guid));
+
+  // Add geometry GUIDs from manifest
+  const svf2 = manifest?.derivatives?.find(d => d.outputType === 'svf2');
+  if (svf2?.children) {
+    svf2.children.forEach(child => {
+      if (child.guid) guidsToTry.add(child.guid);
+      if (child.children) {
+        child.children.forEach(c => {
+          if (c.guid) guidsToTry.add(c.guid);
+        });
+      }
+    });
+  }
+
+  console.log(`   Total GUIDs to try: ${guidsToTry.size}`);
 
   let allObjects = [];
   let treeSummary = {};
 
-  for (const view of views) {
-    console.log(`   Processing view: ${view.name} (${view.role})`);
+  for (const guid of guidsToTry) {
+    console.log(`\n=== Trying GUID: ${guid} ===`);
 
-    // Get properties with retry
+    // Try object tree
     try {
-      const props = await getPropertiesWithRetry(freshToken, urn, view.guid);
-      if (props) {
-        const objects = props.data?.collection || [];
-        allObjects.push(...objects);
-        console.log(`   Objects from ${view.name}: ${objects.length}`);
+      const treeResp = await fetch(
+        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}?forceget=true`,
+        { headers: { 'Authorization': `Bearer ${freshToken}` } }
+      );
+      console.log(`   Tree status: ${treeResp.status}`);
+
+      if (treeResp.ok) {
+        const treeData = await treeResp.json();
+        console.log(`   Tree data: ${JSON.stringify(treeData).slice(0, 500)}...`);
+
+        if (treeData?.data?.objects) {
+          const countTypes = (nodes) => {
+            nodes.forEach(n => {
+              treeSummary[n.name] = (treeSummary[n.name] || 0) + 1;
+              if (n.objects) countTypes(n.objects);
+            });
+          };
+          countTypes(treeData.data.objects);
+        }
       }
     } catch (e) {
-      console.log(`   Properties error: ${e.message}`);
+      console.log(`   Tree error: ${e.message}`);
     }
 
-    // Get tree structure
+    // Try properties
     try {
-      const tree = await getAPSTree(freshToken, urn, view.guid);
-      if (tree?.data?.objects) {
-        const countTypes = (nodes) => {
-          nodes.forEach(n => {
-            treeSummary[n.name] = (treeSummary[n.name] || 0) + 1;
-            if (n.objects) countTypes(n.objects);
-          });
-        };
-        countTypes(tree.data.objects);
+      const propsResp = await fetch(
+        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}/properties?forceget=true`,
+        { headers: { 'Authorization': `Bearer ${freshToken}` } }
+      );
+      console.log(`   Props status: ${propsResp.status}`);
+
+      if (propsResp.status === 200) {
+        const propsData = await propsResp.json();
+        const objects = propsData.data?.collection || [];
+        console.log(`   Props objects: ${objects.length}`);
+
+        if (objects.length > 0) {
+          console.log(`   First 3 objects: ${JSON.stringify(objects.slice(0, 3))}`);
+          allObjects.push(...objects);
+        }
+      } else if (propsResp.status === 202) {
+        console.log('   Props still processing...');
       }
-    } catch (e) {}
+    } catch (e) {
+      console.log(`   Props error: ${e.message}`);
+    }
   }
 
-  console.log(`✅ Total objects extracted: ${allObjects.length}`);
+  console.log(`\n✅ Total objects extracted: ${allObjects.length}`);
+  console.log(`   Tree summary: ${JSON.stringify(treeSummary)}`);
   return { objects: allObjects, treeSummary, viewCount: views.length };
 }
 
@@ -636,8 +683,8 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       const token = await getAPSToken();
       const bucketKey = await ensureBucket(token);
       const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
-      await translateToSVF2(token, urn);
-      const apsData = await extractAPSData(urn);
+      const manifest = await translateToSVF2(token, urn);
+      const apsData = await extractAPSData(urn, manifest);
       const dwgReport = buildDWGReportText(apsData);
 
       reportText = dwgReport.report;

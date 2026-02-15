@@ -1,6 +1,6 @@
 {
   "name": "fire-safety-checker",
-  "version": "26.0.0",
+  "version": "31.0.0",
   "description": "Fire Safety Plan Checker - DXF Vector Analysis",
   "main": "server.js",
   "scripts": {
