@@ -580,6 +580,34 @@ app.post('/api/upload-instructions', instructionUpload.single('instructionFile')
   }
 });
 
+// Parse instruction file without saving (for frontend)
+app.post('/api/parse-instruction', instructionUpload.single('instructionFile'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    let content = '';
+
+    if (ext === '.pdf' && pdfParse) {
+      content = (await pdfParse(fs.readFileSync(req.file.path))).text;
+    } else if ((ext === '.docx' || ext === '.doc') && mammoth) {
+      content = (await mammoth.extractRawText({ path: req.file.path })).value;
+    } else if ((ext === '.xlsx' || ext === '.xls') && XLSX) {
+      const workbook = XLSX.readFile(req.file.path);
+      content = workbook.SheetNames.map(name => {
+        const sheet = workbook.Sheets[name];
+        return XLSX.utils.sheet_to_txt(sheet);
+      }).join('\n');
+    } else {
+      content = fs.readFileSync(req.file.path, 'utf8');
+    }
+
+    fs.unlinkSync(req.file.path);
+    res.json({ success: true, content });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/instructions', (req, res) => {
   res.json(savedInstructions.map(i => ({ id: i.id, name: i.name })));
 });
