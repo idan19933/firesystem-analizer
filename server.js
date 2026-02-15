@@ -1,7 +1,8 @@
 /**
- * Fire Safety Checker - Server v35
+ * Fire Safety Checker - Server v36
  * HIGH-RES VISION: Puppeteer captures 4096x4096 screenshot from APS Viewer
  * Splits into 9 zones + full image -> Claude Vision analysis
+ * NEW: Preview API for full image + zone display in frontend
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Direct parsing (fallback)
  */
@@ -64,6 +65,9 @@ const upload = multer({
 const instructionUpload = multer({ dest: uploadsDir, limits: { fileSize: 50 * 1024 * 1024 } });
 
 let savedInstructions = [];
+
+// Store screenshots and zones in memory for serving
+const screenshotCache = new Map();
 
 // ===== FIRE SAFETY VISION PROMPT =====
 const FIRE_SAFETY_VISION_PROMPT = `אתה מומחה בטיחות אש ישראלי. לפניך תוכנית אדריכלית ברזולוציה גבוהה.
@@ -549,7 +553,7 @@ app.use(express.static('public'));
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '35.0.0',
+    version: '36.0.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
@@ -583,6 +587,28 @@ app.get('/api/instructions', (req, res) => {
 app.delete('/api/instructions/:id', (req, res) => {
   savedInstructions = savedInstructions.filter(i => i.id !== req.params.id);
   res.json({ success: true });
+});
+
+// ===== PREVIEW ENDPOINT =====
+app.get('/api/preview/:id', (req, res) => {
+  const id = req.params.id.replace('.png', '');
+  const zoneIndex = req.query.zone !== undefined ? parseInt(req.query.zone) : null;
+
+  const cached = screenshotCache.get(id);
+  if (!cached) {
+    return res.status(404).json({ error: 'Preview not found' });
+  }
+
+  res.set('Content-Type', 'image/png');
+  res.set('Cache-Control', 'public, max-age=3600');
+
+  if (zoneIndex !== null && cached.zones && cached.zones[zoneIndex]) {
+    res.send(cached.zones[zoneIndex]);
+  } else if (cached.full) {
+    res.send(cached.full);
+  } else {
+    res.status(404).json({ error: 'Image not found' });
+  }
 });
 
 // ===== MAIN ANALYSIS ENDPOINT =====
@@ -639,6 +665,9 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       // Split into zones
       const zones = await splitIntoZones(fullImage);
 
+      // Store in cache for preview endpoint
+      screenshotCache.set(screenshotId, { full: fullImage, zones });
+
       // Analyze with Claude Vision
       report = await analyzeWithClaudeVision(fullImage, zones, customPrompt);
 
@@ -680,11 +709,15 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     // Cleanup temp files (but keep screenshot)
     tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
 
+    // Extract screenshotId from URL for zone requests
+    const screenshotId = screenshotUrl ? screenshotUrl.replace('/screenshots/', '').replace('.png', '') : null;
+
     res.json({
       success: true,
       fileName: originalName,
       analysisTime: totalTime,
       screenshotUrl,
+      screenshotId,
       analysis: analysisData,
       report
     });
@@ -700,7 +733,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🔥 FIRE SAFETY CHECKER v35 (Vision)');
+  console.log('🔥 FIRE SAFETY CHECKER v36 (Vision + Preview)');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);

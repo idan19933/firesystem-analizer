@@ -476,6 +476,52 @@
     }
     .download-btn:hover { background: var(--primary); border-color: var(--primary); }
 
+    /* Zones Grid */
+    .zones-container {
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+    .zones-container h4 {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 12px;
+    }
+    .zones-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .zone-item {
+      aspect-ratio: 1;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 2px solid var(--border);
+      cursor: pointer;
+      transition: all 0.3s;
+      position: relative;
+    }
+    .zone-item:hover {
+      border-color: var(--primary);
+      transform: scale(1.03);
+      z-index: 5;
+    }
+    .zone-item img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .zone-item .zone-label {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      background: rgba(0,0,0,0.7);
+      color: white;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+    }
+
     /* Categories Grid */
     .categories-grid {
       display: grid;
@@ -879,7 +925,7 @@
     <div class="logo">🔥</div>
     <h1>FireCheck Pro</h1>
     <p>בדיקת בטיחות אש חכמה לתוכניות אדריכליות</p>
-    <span class="version-badge">גרסה 35 - רזולוציה גבוהה + AI</span>
+    <span class="version-badge">גרסה 36 - רזולוציה גבוהה + תצוגה מקדימה</span>
   </header>
 
   <div class="container">
@@ -993,6 +1039,12 @@
           <img id="fullImage" src="" alt="Plan">
         </div>
         <a href="" download="plan.png" class="download-btn" id="downloadBtn">📥 הורד תמונה</a>
+
+        <!-- Zones Grid -->
+        <div class="zones-container" id="zonesContainer" style="display:none">
+          <h4>🔍 אזורים מנותחים (רשת 3×3):</h4>
+          <div class="zones-grid" id="zonesGrid"></div>
+        </div>
       </div>
 
       <!-- Score -->
@@ -1402,10 +1454,37 @@
         document.getElementById('downloadBtn').href = imgUrl;
 
         const badges = document.getElementById('sourceBadges');
-        if (data.screenshotUrl) {
+        const zonesContainer = document.getElementById('zonesContainer');
+        const zonesGrid = document.getElementById('zonesGrid');
+
+        if (data.screenshotUrl && data.screenshotId) {
           // High-res screenshot from vision pipeline
           badges.innerHTML = '<span class="source-badge derivative">רזולוציה גבוהה</span><span class="source-badge thumbnail">4096×4096</span>';
+
+          // Show zones grid
+          zonesContainer.style.display = 'block';
+          zonesGrid.innerHTML = '';
+
+          const zoneLabels = [
+            'שמאל-עליון', 'מרכז-עליון', 'ימין-עליון',
+            'שמאל-אמצע', 'מרכז', 'ימין-אמצע',
+            'שמאל-תחתון', 'מרכז-תחתון', 'ימין-תחתון'
+          ];
+
+          for (let i = 0; i < 9; i++) {
+            const zoneDiv = document.createElement('div');
+            zoneDiv.className = 'zone-item';
+            zoneDiv.innerHTML = `
+              <img src="${API_BASE}/preview/${data.screenshotId}?zone=${i}" alt="Zone ${i + 1}">
+              <span class="zone-label">${zoneLabels[i]}</span>
+            `;
+            zoneDiv.onclick = function() {
+              openLightbox(`${API_BASE}/preview/${data.screenshotId}?zone=${i}`);
+            };
+            zonesGrid.appendChild(zoneDiv);
+          }
         } else {
+          zonesContainer.style.display = 'none';
           const srcClass = data.sourceType === 'vector-dxf' ? 'vector' : (data.sourceType === 'derivative' ? 'derivative' : 'thumbnail');
           const srcLabel = data.sourceType === 'vector-dxf' ? 'רנדור וקטורי' : (data.sourceType === 'derivative' ? 'מקור' : 'תמונה');
           badges.innerHTML = '<span class="source-badge ' + srcClass + '">' + srcLabel + '</span>';
@@ -1489,6 +1568,8 @@
       document.getElementById('imageSection').style.display = 'none';
       document.getElementById('vectorSection').style.display = 'none';
       document.getElementById('methodBadgeWrap').style.display = 'none';
+      document.getElementById('zonesContainer').style.display = 'none';
+      document.getElementById('zonesGrid').innerHTML = '';
       document.getElementById('scoreCircle').style.strokeDashoffset = 502;
       fileInput.value = '';
     }

@@ -23,6 +23,9 @@ aptPkgs = [
   "libnspr4"
 ]
 
+[phases.install]
+cmds = ["npm install"]
+
 [variables]
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
 PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"

@@ -1,6 +1,6 @@
 {
   "name": "fire-safety-checker",
-  "version": "35.0.0",
+  "version": "36.0.0",
   "description": "Fire Safety Plan Checker - High-Res Vision Analysis",
   "main": "server.js",
   "scripts": {
