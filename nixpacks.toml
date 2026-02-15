@@ -1,5 +1,5 @@
 # Nixpacks configuration for Railway
-# No system dependencies needed for DXF-only mode
+# libredwg-utils provides dwg2dxf for DWG->DXF conversion
 
 [phases.setup]
-aptPkgs = []
+aptPkgs = ["libredwg-tools"]

@@ -1,8 +1,9 @@
 /**
- * Fire Safety Checker - Server v32
- * DXF: Pure vector analysis (direct parsing)
- * DWG/DWF: APS upload -> translate -> extract properties -> Claude
- * Fixes: Retry 202 status for properties/tree (wait 15s, up to 20 attempts)
+ * Fire Safety Checker - Server v33
+ * Pure local processing - NO APS dependency
+ * DWG: Convert to DXF using libredwg (dwg2dxf)
+ * DXF: Direct parsing with dxf-analyzer
+ * DWF: Extract from ZIP and parse embedded data
  */
 
 const express = require('express');
@@ -11,6 +12,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { execSync } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const AdmZip = require('adm-zip');
 
@@ -28,8 +30,6 @@ app.use(express.json());
 app.use(cors({ origin: true, credentials: true }));
 
 // Environment variables
-const APS_CLIENT_ID = process.env.APS_CLIENT_ID;
-const APS_CLIENT_SECRET = process.env.APS_CLIENT_SECRET;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 // Directories
@@ -73,480 +73,149 @@ const FIRE_SAFETY_PROMPT = `אתה מומחה בטיחות אש ישראלי. נ
   "detailedReport": "דוח מפורט בעברית"
 }`;
 
-// ===== APS AUTHENTICATION =====
-async function getAPSToken() {
-  if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
-    throw new Error('APS credentials not configured');
-  }
+// ===== CONVERT DWG TO DXF USING LIBREDWG =====
+function convertDWGtoDXF(dwgPath) {
+  const dxfPath = dwgPath.replace(/\.dwg$/i, '.dxf');
 
-  const resp = await fetch('https://developer.api.autodesk.com/authentication/v2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: APS_CLIENT_ID,
-      client_secret: APS_CLIENT_SECRET,
-      scope: 'data:read data:write data:create bucket:read bucket:create'
-    })
-  });
+  console.log('🔄 Converting DWG to DXF using libredwg...');
+  console.log(`   Input: ${dwgPath}`);
+  console.log(`   Output: ${dxfPath}`);
 
-  if (!resp.ok) throw new Error(`APS auth failed: ${resp.status}`);
-  const data = await resp.json();
-  return data.access_token;
-}
-
-// ===== APS BUCKET =====
-async function ensureBucket(token) {
-  const bucketKey = `firechecker-${APS_CLIENT_ID.toLowerCase().substring(0, 8)}`;
-
-  // Check if exists
-  const checkResp = await fetch(
-    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/details`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-
-  if (checkResp.ok) return bucketKey;
-
-  // Create bucket
-  const createResp = await fetch('https://developer.api.autodesk.com/oss/v2/buckets', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      bucketKey,
-      policyKey: 'transient'
-    })
-  });
-
-  if (!createResp.ok && createResp.status !== 409) {
-    throw new Error(`Bucket creation failed: ${createResp.status}`);
-  }
-
-  return bucketKey;
-}
-
-// ===== APS MULTIPART UPLOAD =====
-async function uploadToAPS(token, bucketKey, filePath, fileName) {
-  const fileSize = fs.statSync(filePath).size;
-  const ext = path.extname(fileName).toLowerCase();
-
-  // Generate safe ASCII filename - Hebrew/Unicode filenames break APS
-  const safeFileName = `plan_${Date.now()}${ext}`;
-  console.log(`📤 Original: ${fileName}`);
-  console.log(`📤 APS name: ${safeFileName}`);
-  console.log(`📤 Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB in ${Math.ceil(fileSize / (5 * 1024 * 1024))} parts...`);
-
-  const PART_SIZE = 5 * 1024 * 1024;
-  const numParts = Math.ceil(fileSize / PART_SIZE);
-
-  // Get signed URLs
-  const signedResp = await fetch(
-    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload?parts=${numParts}`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-
-  if (!signedResp.ok) throw new Error(`Failed to get signed URLs: ${signedResp.status}`);
-  const signedData = await signedResp.json();
-
-  // Upload parts
-  const fileData = fs.readFileSync(filePath);
-  const eTags = [];
-
-  for (let i = 0; i < numParts; i++) {
-    const start = i * PART_SIZE;
-    const end = Math.min(start + PART_SIZE, fileSize);
-    const partData = fileData.slice(start, end);
-
-    const partResp = await fetch(signedData.urls[i], {
-      method: 'PUT',
-      headers: { 'Content-Length': partData.length.toString() },
-      body: partData
+  try {
+    // dwg2dxf outputs to same directory with .dxf extension
+    execSync(`dwg2dxf "${dwgPath}"`, {
+      timeout: 120000,
+      stdio: ['pipe', 'pipe', 'pipe']
     });
 
-    if (!partResp.ok) throw new Error(`Part ${i + 1} upload failed: ${partResp.status}`);
-    eTags.push(partResp.headers.get('ETag'));
-    console.log(`   Part ${i + 1}/${numParts} uploaded`);
+    if (fs.existsSync(dxfPath)) {
+      const size = fs.statSync(dxfPath).size;
+      console.log(`✅ Converted to DXF: ${(size / 1024 / 1024).toFixed(2)} MB`);
+      return dxfPath;
+    }
+  } catch (err) {
+    console.log(`⚠️ dwg2dxf error: ${err.message}`);
   }
 
-  // Complete upload
-  const completeResp = await fetch(
-    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload`,
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ uploadKey: signedData.uploadKey })
-    }
-  );
-
-  if (!completeResp.ok) throw new Error(`Upload completion failed: ${completeResp.status}`);
-  const result = await completeResp.json();
-
-  const urn = Buffer.from(result.objectId).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  console.log(`✅ Upload complete. URN: ${urn.substring(0, 30)}...`);
-  return urn;
-}
-
-// ===== APS TRANSLATION (force fresh) =====
-async function translateToSVF2(token, urn) {
-  // Delete old cached manifest to force re-translation
-  console.log('🗑️ Deleting old cached translation...');
+  // Try alternative: dwgread
   try {
-    const deleteResp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
-      {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      }
-    );
-    console.log(`   Delete manifest: ${deleteResp.status}`);
-  } catch (e) {
-    console.log('   No existing manifest to delete');
-  }
+    console.log('   Trying dwgread as fallback...');
+    execSync(`dwgread -o "${dxfPath}" "${dwgPath}"`, {
+      timeout: 120000,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
 
-  // Wait for deletion to propagate
-  await new Promise(r => setTimeout(r, 3000));
-
-  console.log('🔄 Submitting fresh translation job...');
-  const resp = await fetch('https://developer.api.autodesk.com/modelderivative/v2/designdata/job', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'x-ads-force': 'true'
-    },
-    body: JSON.stringify({
-      input: { urn },
-      output: { formats: [{ type: 'svf2', views: ['2d', '3d'] }] }
-    })
-  });
-
-  if (!resp.ok) {
-    const error = await resp.text();
-    throw new Error(`Translation job failed: ${resp.status} - ${error}`);
-  }
-
-  const manifest = await waitForTranslation(token, urn);
-  console.log('MANIFEST RAW:', JSON.stringify(manifest));
-
-  // Verify translation produced viewable geometry
-  const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
-  const has2dView = svf2?.children?.some(c => c.role === '2d');
-  const has3dView = svf2?.children?.some(c => c.role === '3d');
-  console.log(`📐 Views in manifest: 2D=${has2dView}, 3D=${has3dView}`);
-
-  if (!has2dView && !has3dView) {
-    console.log('⚠️ WARNING: Translation produced no viewable geometry (only PropertyDatabase)');
-    console.log('   Waiting 30s and re-checking manifest...');
-    await new Promise(r => setTimeout(r, 30000));
-
-    // Re-fetch manifest
-    const recheckResp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    const recheckManifest = await recheckResp.json();
-    const recheckSvf2 = recheckManifest.derivatives?.find(d => d.outputType === 'svf2');
-    const recheck2d = recheckSvf2?.children?.some(c => c.role === '2d');
-    const recheck3d = recheckSvf2?.children?.some(c => c.role === '3d');
-    console.log(`📐 Re-check views: 2D=${recheck2d}, 3D=${recheck3d}`);
-
-    if (recheck2d || recheck3d) {
-      return recheckManifest;
+    if (fs.existsSync(dxfPath)) {
+      const size = fs.statSync(dxfPath).size;
+      console.log(`✅ Converted with dwgread: ${(size / 1024 / 1024).toFixed(2)} MB`);
+      return dxfPath;
     }
+  } catch (err2) {
+    console.log(`⚠️ dwgread error: ${err2.message}`);
   }
 
-  return manifest;
+  throw new Error('Failed to convert DWG to DXF. libredwg may not be installed or the DWG file is corrupted.');
 }
 
-// ===== WAIT FOR TRANSLATION (BUG FIX #1: check SVF2 derivative) =====
-async function waitForTranslation(token, urn) {
-  const maxWait = 15 * 60 * 1000;
-  const start = Date.now();
+// ===== EXTRACT DWF (ZIP-based format) =====
+function extractDWF(dwfPath) {
+  console.log('📦 Extracting DWF file (ZIP-based format)...');
 
-  while (Date.now() - start < maxWait) {
-    const resp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    const manifest = await resp.json();
+  const zip = new AdmZip(dwfPath);
+  const entries = zip.getEntries();
 
-    // Check if overall manifest is done
-    if (manifest.status === 'success' || manifest.status === 'complete') {
-      console.log('✅ Translation complete (manifest status)');
-      return manifest;
-    }
+  console.log(`   Found ${entries.length} entries in DWF:`);
 
-    // BUG FIX #1: Check if SVF2 derivative is done (even if overall is "inprogress")
-    const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
-    if (svf2 && svf2.status === 'success') {
-      console.log('✅ SVF2 derivative complete - proceeding to extraction');
-      return manifest;
-    }
-
-    if (manifest.status === 'failed') {
-      const errorMsg = manifest.derivatives?.find(d => d.status === 'failed')?.messages?.[0]?.message || 'Unknown error';
-      throw new Error(`Translation failed: ${errorMsg}`);
-    }
-
-    const elapsed = Math.round((Date.now() - start) / 1000);
-    console.log(`   Translation: ${manifest.progress || '0%'} (${elapsed}s)`);
-    await new Promise(r => setTimeout(r, 5000));
-  }
-
-  throw new Error('Translation timeout');
-}
-
-// ===== APS METADATA EXTRACTION (with retries) =====
-async function getMetadataWithRetry(token, urn) {
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const resp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    const data = await resp.json();
-    const viewCount = data.data?.metadata?.length || 0;
-    console.log(`   Metadata attempt ${attempt + 1}: status=${resp.status}, views=${viewCount}`);
-    console.log('   METADATA RAW:', JSON.stringify(data));
-
-    if (viewCount > 0) {
-      return data;
-    }
-
-    console.log('   No views yet, waiting 10s...');
-    await new Promise(r => setTimeout(r, 10000));
-  }
-  throw new Error('Metadata not available after retries');
-}
-
-async function getPropertiesWithRetry(token, urn, guid) {
-  for (let attempt = 0; attempt < 15; attempt++) {
-    const resp = await fetch(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}/properties?forceget=true`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
-    );
-    console.log(`   Properties attempt ${attempt + 1}: status=${resp.status}`);
-
-    if (resp.status === 200) {
-      return await resp.json();
-    }
-    if (resp.status === 202) {
-      console.log('   Properties processing, waiting 15s...');
-      await new Promise(r => setTimeout(r, 15000));
-      continue;
-    }
-
-    const errorText = await resp.text();
-    console.log(`   Properties error: ${resp.status} - ${errorText}`);
-    break;
-  }
-  return null;
-}
-
-async function getAPSTree(token, urn, guid) {
-  const resp = await fetch(
-    `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${guid}`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-  if (!resp.ok) return null;
-  return await resp.json();
-}
-
-// ===== EXTRACT ALL APS DATA =====
-async function extractAPSData(urn, manifest) {
-  console.log('📊 Extracting APS data...');
-
-  // Wait for metadata indexing
-  console.log('   Waiting 10s for metadata indexing...');
-  await new Promise(r => setTimeout(r, 10000));
-
-  // Get fresh token
-  console.log('   Getting fresh token...');
-  const freshToken = await getAPSToken();
-
-  // Get metadata with retry
-  const metadata = await getMetadataWithRetry(freshToken, urn);
-  const views = metadata.data?.metadata || [];
-  console.log(`   Found ${views.length} views from metadata`);
-  console.log('   Available views:', JSON.stringify(views));
-
-  if (views.length === 0) {
-    console.log('❌ No views found in metadata');
-    return { objects: [], treeSummary: {}, viewCount: 0 };
-  }
-
-  // Use only the GUID from metadata (not manifest GUIDs - those are resource IDs)
-  const validGuid = views[0].guid;
-  console.log(`\n🎯 Using metadata GUID: ${validGuid}`);
-
-  let allObjects = [];
-  let treeSummary = {};
-
-  // Retry properties with 202 handling (up to 20 attempts, 15s each = 5 min max)
-  console.log('\n📋 Fetching properties (with retry for 202)...');
-  for (let attempt = 1; attempt <= 20; attempt++) {
-    try {
-      const propsResp = await fetch(
-        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}/properties?forceget=true`,
-        { headers: { 'Authorization': `Bearer ${freshToken}` } }
-      );
-      console.log(`   Properties attempt ${attempt}: status=${propsResp.status}`);
-
-      if (propsResp.status === 200) {
-        const propsData = await propsResp.json();
-        const objects = propsData.data?.collection || [];
-        console.log(`   ✅ Objects found: ${objects.length}`);
-        if (objects.length > 0) {
-          console.log(`   First 3: ${JSON.stringify(objects.slice(0, 3))}`);
-          allObjects = objects;
-        }
-        break; // Success, exit retry loop
-      }
-
-      if (propsResp.status === 202) {
-        console.log('   ⏳ Still processing, waiting 15s...');
-        await new Promise(r => setTimeout(r, 15000));
-        continue; // Retry
-      }
-
-      // Other status (404, 500, etc.) - stop retrying
-      console.log(`   ❌ Unexpected status ${propsResp.status}, stopping`);
-      break;
-    } catch (e) {
-      console.log(`   ❌ Props error: ${e.message}`);
-      break;
-    }
-  }
-
-  // Retry tree with 202 handling
-  console.log('\n🌳 Fetching object tree (with retry for 202)...');
-  for (let attempt = 1; attempt <= 20; attempt++) {
-    try {
-      const treeResp = await fetch(
-        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}?forceget=true`,
-        { headers: { 'Authorization': `Bearer ${freshToken}` } }
-      );
-      console.log(`   Tree attempt ${attempt}: status=${treeResp.status}`);
-
-      if (treeResp.status === 200) {
-        const treeData = await treeResp.json();
-        console.log(`   ✅ Tree data received`);
-
-        if (treeData?.data?.objects) {
-          const countTypes = (nodes) => {
-            nodes.forEach(n => {
-              treeSummary[n.name] = (treeSummary[n.name] || 0) + 1;
-              if (n.objects) countTypes(n.objects);
-            });
-          };
-          countTypes(treeData.data.objects);
-          console.log(`   Tree summary: ${JSON.stringify(treeSummary)}`);
-        }
-        break; // Success
-      }
-
-      if (treeResp.status === 202) {
-        console.log('   ⏳ Still processing, waiting 15s...');
-        await new Promise(r => setTimeout(r, 15000));
-        continue;
-      }
-
-      console.log(`   ❌ Unexpected status ${treeResp.status}, stopping`);
-      break;
-    } catch (e) {
-      console.log(`   ❌ Tree error: ${e.message}`);
-      break;
-    }
-  }
-
-  console.log(`\n✅ Total objects extracted: ${allObjects.length}`);
-  return { objects: allObjects, treeSummary, viewCount: views.length };
-}
-
-// ===== BUILD DWG REPORT TEXT =====
-function buildDWGReportText(apsData) {
-  const { objects, treeSummary, viewCount } = apsData;
-
-  // Categorize objects
-  const categories = {
-    sprinklers: [],
-    smokeDetectors: [],
-    fireDoors: [],
-    exits: [],
-    fireExtinguishers: [],
-    hydrants: [],
-    texts: [],
-    blocks: [],
-    other: []
+  let extractedData = {
+    manifest: null,
+    sections: [],
+    graphics: [],
+    texts: []
   };
 
-  const patterns = {
-    sprinklers: /sprink|ספרינק|מתז|head/i,
-    smokeDetectors: /smoke|detector|גלאי|עשן/i,
-    fireDoors: /fire.?door|דלת.?אש/i,
-    exits: /exit|יציאה|מוצא/i,
-    fireExtinguishers: /extinguisher|מטף/i,
-    hydrants: /hydrant|הידרנט|ברז/i
-  };
+  entries.forEach(entry => {
+    const name = entry.entryName;
+    const size = entry.header.size;
+    console.log(`   - ${name} (${size} bytes)`);
 
-  objects.forEach(obj => {
-    const name = obj.name || '';
-    const props = obj.properties || {};
-    let categorized = false;
-
-    for (const [cat, pattern] of Object.entries(patterns)) {
-      if (pattern.test(name) || pattern.test(JSON.stringify(props))) {
-        categories[cat].push({ name, props });
-        categorized = true;
-        break;
-      }
+    // Look for manifest.xml
+    if (name.toLowerCase().includes('manifest') && name.endsWith('.xml')) {
+      extractedData.manifest = entry.getData().toString('utf8');
     }
 
-    if (!categorized) {
-      if (/text|mtext/i.test(name)) categories.texts.push({ name, props });
-      else if (/block|insert/i.test(name)) categories.blocks.push({ name, props });
-      else categories.other.push({ name, props });
+    // Look for section XML files
+    if (name.endsWith('.xml') && !name.includes('manifest')) {
+      try {
+        const content = entry.getData().toString('utf8');
+        extractedData.sections.push({ name, content });
+
+        // Extract text content from XML
+        const textMatches = content.match(/<Text[^>]*>([^<]+)<\/Text>/gi) || [];
+        textMatches.forEach(match => {
+          const text = match.replace(/<[^>]+>/g, '').trim();
+          if (text.length > 0) extractedData.texts.push(text);
+        });
+      } catch (e) {}
+    }
+
+    // Track graphics files (w2d, f2d)
+    if (name.match(/\.(w2d|f2d)$/i)) {
+      extractedData.graphics.push({ name, size });
     }
   });
 
-  let report = `=== נתוני DWG מ-Autodesk APS ===
+  console.log(`✅ Extracted: ${extractedData.sections.length} sections, ${extractedData.texts.length} texts, ${extractedData.graphics.length} graphics`);
 
-סיכום כללי:
-- מספר אובייקטים: ${objects.length}
-- מספר תצוגות: ${viewCount}
+  return extractedData;
+}
 
-מבנה התוכנית:
-${Object.entries(treeSummary).slice(0, 20).map(([k, v]) => `  - ${k}: ${v}`).join('\n')}
+// ===== BUILD DWF REPORT TEXT =====
+function buildDWFReportText(dwfData) {
+  let report = `=== נתוני קובץ DWF ===
 
-=== מערכות בטיחות אש ===
+מבנה הקובץ:
+- קבצי גרפיקה: ${dwfData.graphics.length}
+- סקשנים: ${dwfData.sections.length}
+- טקסטים שזוהו: ${dwfData.texts.length}
 
-ספרינקלרים: ${categories.sprinklers.length}
-${categories.sprinklers.slice(0, 10).map(s => `  - ${s.name}`).join('\n')}
+=== טקסטים שנמצאו ===
+${dwfData.texts.slice(0, 100).join('\n')}
 
-גלאי עשן: ${categories.smokeDetectors.length}
-${categories.smokeDetectors.slice(0, 10).map(s => `  - ${s.name}`).join('\n')}
-
-דלתות אש: ${categories.fireDoors.length}
-${categories.fireDoors.slice(0, 10).map(s => `  - ${s.name}`).join('\n')}
-
-יציאות חירום: ${categories.exits.length}
-${categories.exits.slice(0, 10).map(s => `  - ${s.name}`).join('\n')}
-
-מטפי כיבוי: ${categories.fireExtinguishers.length}
-הידרנטים: ${categories.hydrants.length}
-
-=== טקסטים ===
-${categories.texts.slice(0, 30).map(t => `- ${t.name}`).join('\n')}
-
-=== בלוקים ===
-${categories.blocks.slice(0, 30).map(b => `- ${b.name}`).join('\n')}
+=== קבצי גרפיקה ===
+${dwfData.graphics.map(g => `- ${g.name} (${(g.size / 1024).toFixed(1)} KB)`).join('\n')}
 `;
 
-  return { report, categories };
+  // Try to identify fire safety elements from texts
+  const fireSafety = {
+    sprinklers: 0,
+    smokeDetectors: 0,
+    exits: 0,
+    fireDoors: 0,
+    extinguishers: 0,
+    hydrants: 0
+  };
+
+  dwfData.texts.forEach(text => {
+    const lower = text.toLowerCase();
+    if (/sprink|ספרינק|מתז/.test(lower)) fireSafety.sprinklers++;
+    if (/smoke|גלאי|עשן/.test(lower)) fireSafety.smokeDetectors++;
+    if (/exit|יציאה|מוצא/.test(lower)) fireSafety.exits++;
+    if (/fire.?door|דלת.?אש/.test(lower)) fireSafety.fireDoors++;
+    if (/extinguisher|מטף/.test(lower)) fireSafety.extinguishers++;
+    if (/hydrant|הידרנט|ברז.?כיבוי/.test(lower)) fireSafety.hydrants++;
+  });
+
+  report += `
+=== מערכות בטיחות אש שזוהו ===
+- ספרינקלרים: ${fireSafety.sprinklers}
+- גלאי עשן: ${fireSafety.smokeDetectors}
+- יציאות חירום: ${fireSafety.exits}
+- דלתות אש: ${fireSafety.fireDoors}
+- מטפי כיבוי: ${fireSafety.extinguishers}
+- הידרנטים: ${fireSafety.hydrants}
+`;
+
+  return { report, fireSafety };
 }
 
 // ===== EXTRACT FROM ZIP =====
@@ -612,21 +281,36 @@ app.use(express.static('public'));
 
 // ===== API ROUTES =====
 app.get('/api/health', (req, res) => {
+  // Check if libredwg is available
+  let libredwg = false;
+  try {
+    execSync('dwg2dxf --version 2>&1 || true', { timeout: 5000 });
+    libredwg = true;
+  } catch (e) {}
+
   res.json({
     status: 'ok',
-    version: '30.0.0',
-    aps: APS_CLIENT_ID ? 'configured' : 'not configured',
-    claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured'
+    version: '33.0.0',
+    libredwg: libredwg ? 'installed' : 'not installed',
+    claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured',
+    mode: 'Local processing (no APS)'
   });
 });
 
 app.post('/api/upload-instructions', instructionUpload.single('instructionFile'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file' });
-    const ext = path.extname(req.file.path).toLowerCase();
+    const ext = path.extname(req.file.originalname).toLowerCase();
     let content = '';
     if (ext === '.pdf' && pdfParse) content = (await pdfParse(fs.readFileSync(req.file.path))).text;
     else if ((ext === '.docx' || ext === '.doc') && mammoth) content = (await mammoth.extractRawText({ path: req.file.path })).value;
+    else if ((ext === '.xlsx' || ext === '.xls') && XLSX) {
+      const workbook = XLSX.readFile(req.file.path);
+      content = workbook.SheetNames.map(name => {
+        const sheet = workbook.Sheets[name];
+        return XLSX.utils.sheet_to_csv(sheet);
+      }).join('\n\n');
+    }
     else content = fs.readFileSync(req.file.path, 'utf8');
 
     const instruction = { id: uuidv4(), name: req.body.name || req.file.originalname, content, createdAt: new Date().toISOString() };
@@ -656,61 +340,58 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     console.log('\n========================================');
-    console.log('🔥 FIRE SAFETY ANALYSIS v27');
+    console.log('🔥 FIRE SAFETY ANALYSIS v33 (Local)');
     console.log(`📁 ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)}MB)`);
     console.log('========================================\n');
 
     tempFiles.push(req.file.path);
 
     // Extract from ZIP if needed
-    const { filePath, originalName } = extractFromZip(req.file.path, req.file.originalname);
+    let { filePath, originalName } = extractFromZip(req.file.path, req.file.originalname);
     if (filePath !== req.file.path) tempFiles.push(filePath);
 
-    const ext = path.extname(originalName).toLowerCase();
+    let ext = path.extname(originalName).toLowerCase();
     let reportText, analysisData;
 
+    // ===== DWG: Convert to DXF first =====
+    if (ext === '.dwg') {
+      console.log('📐 DWG detected - converting to DXF with libredwg');
+      const dxfPath = convertDWGtoDXF(filePath);
+      tempFiles.push(dxfPath);
+      filePath = dxfPath;
+      ext = '.dxf';
+    }
+
+    // ===== DXF: Direct parsing =====
     if (ext === '.dxf') {
-      // ===== DXF PATH: Direct parsing =====
-      console.log('📐 DXF detected - using direct vector parsing');
+      console.log('📐 Parsing DXF with vector analyzer...');
       const analysis = await analyzeDXFComplete(filePath);
       reportText = analysis.reportText;
       analysisData = {
-        method: 'DXF Vector Parsing',
+        method: 'DXF Vector Parsing (Local)',
         entities: analysis.parsed.totalEntities,
         layers: Object.keys(analysis.tree.layers).length,
         texts: analysis.parsed.texts.length,
         fireSafety: analysis.reportData.fireSafety
       };
+    }
 
-    } else if (ext === '.dwg' || ext === '.dwf') {
-      // ===== DWG/DWF PATH: APS extraction =====
-      console.log(`🏗️ ${ext.toUpperCase()} detected - using APS extraction`);
-
-      if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
-        throw new Error('APS credentials not configured. Use DXF format instead.');
-      }
-
-      const token = await getAPSToken();
-      const bucketKey = await ensureBucket(token);
-      const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
-      const manifest = await translateToSVF2(token, urn);
-      const apsData = await extractAPSData(urn, manifest);
-      const dwgReport = buildDWGReportText(apsData);
-
-      reportText = dwgReport.report;
+    // ===== DWF: Extract ZIP and parse =====
+    else if (ext === '.dwf') {
+      console.log('📦 DWF detected - extracting embedded data...');
+      const dwfData = extractDWF(filePath);
+      const dwfReport = buildDWFReportText(dwfData);
+      reportText = dwfReport.report;
       analysisData = {
-        method: 'APS Property Extraction',
-        objects: apsData.objects.length,
-        views: apsData.viewCount,
-        fireSafety: {
-          sprinklers: { count: dwgReport.categories.sprinklers.length },
-          smokeDetectors: { count: dwgReport.categories.smokeDetectors.length },
-          fireDoors: { count: dwgReport.categories.fireDoors.length },
-          exits: { count: dwgReport.categories.exits.length }
-        }
+        method: 'DWF Extraction (Local)',
+        graphics: dwfData.graphics.length,
+        sections: dwfData.sections.length,
+        texts: dwfData.texts.length,
+        fireSafety: dwfReport.fireSafety
       };
+    }
 
-    } else {
+    else {
       throw new Error('Unsupported file format. Use DWG, DXF, or DWF.');
     }
 
@@ -748,13 +429,23 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 // ===== START SERVER =====
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
+  // Check libredwg availability
+  let libredwgStatus = 'not installed';
+  try {
+    execSync('which dwg2dxf || where dwg2dxf 2>&1', { timeout: 5000 });
+    libredwgStatus = 'installed';
+  } catch (e) {}
+
   console.log('\n========================================');
-  console.log('🔥 FIRE SAFETY CHECKER v27');
+  console.log('🔥 FIRE SAFETY CHECKER v33');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📐 DXF: Direct vector parsing`);
-  console.log(`🏗️ DWG: APS extraction (${APS_CLIENT_ID ? 'ready' : 'not configured'})`);
+  console.log(`🔄 DWG: libredwg conversion (${libredwgStatus})`);
+  console.log(`📦 DWF: ZIP extraction`);
   console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? 'ready' : 'not configured'}`);
+  console.log('========================================');
+  console.log('✅ NO APS DEPENDENCY - Pure local processing');
   console.log('========================================\n');
 });
 
