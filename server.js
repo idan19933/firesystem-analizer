@@ -1,8 +1,8 @@
 /**
- * Fire Safety Checker - Server v29
+ * Fire Safety Checker - Server v30
  * DXF: Pure vector analysis (direct parsing)
- * DWG: APS upload -> DELETE old manifest -> fresh translate -> extract
- * Fixes: Force re-translation by deleting cached broken manifest
+ * DWG/DWF: APS upload -> translate -> extract properties -> Claude
+ * Fixes: ASCII filename for APS (Hebrew was corrupting), DWF support
  */
 
 const express = require('express');
@@ -37,14 +37,14 @@ const tmpDir = os.tmpdir();
 const uploadsDir = path.join(tmpDir, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
-// Multer - accept DWG, DXF, ZIP
+// Multer - accept DWG, DXF, DWF, ZIP
 const upload = multer({
   dest: uploadsDir,
   limits: { fileSize: 500 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (['.dwg', '.dxf', '.zip'].includes(ext)) cb(null, true);
-    else cb(new Error('רק קבצי DWG, DXF או ZIP'));
+    if (['.dwg', '.dxf', '.dwf', '.zip'].includes(ext)) cb(null, true);
+    else cb(new Error('רק קבצי DWG, DXF, DWF או ZIP'));
   }
 });
 
@@ -130,11 +130,16 @@ async function ensureBucket(token) {
 // ===== APS MULTIPART UPLOAD =====
 async function uploadToAPS(token, bucketKey, filePath, fileName) {
   const fileSize = fs.statSync(filePath).size;
-  const safeFileName = encodeURIComponent(fileName.replace(/[^a-zA-Z0-9._-]/g, '_'));
+  const ext = path.extname(fileName).toLowerCase();
+
+  // Generate safe ASCII filename - Hebrew/Unicode filenames break APS
+  const safeFileName = `plan_${Date.now()}${ext}`;
+  console.log(`📤 Original: ${fileName}`);
+  console.log(`📤 APS name: ${safeFileName}`);
+  console.log(`📤 Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB in ${Math.ceil(fileSize / (5 * 1024 * 1024))} parts...`);
+
   const PART_SIZE = 5 * 1024 * 1024;
   const numParts = Math.ceil(fileSize / PART_SIZE);
-
-  console.log(`📤 Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB in ${numParts} parts...`);
 
   // Get signed URLs
   const signedResp = await fetch(
@@ -227,6 +232,34 @@ async function translateToSVF2(token, urn) {
 
   const manifest = await waitForTranslation(token, urn);
   console.log('MANIFEST RAW:', JSON.stringify(manifest));
+
+  // Verify translation produced viewable geometry
+  const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
+  const has2dView = svf2?.children?.some(c => c.role === '2d');
+  const has3dView = svf2?.children?.some(c => c.role === '3d');
+  console.log(`📐 Views in manifest: 2D=${has2dView}, 3D=${has3dView}`);
+
+  if (!has2dView && !has3dView) {
+    console.log('⚠️ WARNING: Translation produced no viewable geometry (only PropertyDatabase)');
+    console.log('   Waiting 30s and re-checking manifest...');
+    await new Promise(r => setTimeout(r, 30000));
+
+    // Re-fetch manifest
+    const recheckResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const recheckManifest = await recheckResp.json();
+    const recheckSvf2 = recheckManifest.derivatives?.find(d => d.outputType === 'svf2');
+    const recheck2d = recheckSvf2?.children?.some(c => c.role === '2d');
+    const recheck3d = recheckSvf2?.children?.some(c => c.role === '3d');
+    console.log(`📐 Re-check views: 2D=${recheck2d}, 3D=${recheck3d}`);
+
+    if (recheck2d || recheck3d) {
+      return recheckManifest;
+    }
+  }
+
   return manifest;
 }
 
@@ -471,10 +504,10 @@ function extractFromZip(filePath, originalName) {
   const cadEntry = entries.find(e => {
     if (e.isDirectory) return false;
     const eExt = path.extname(e.entryName).toLowerCase();
-    return ['.dwg', '.dxf'].includes(eExt);
+    return ['.dwg', '.dxf', '.dwf'].includes(eExt);
   });
 
-  if (!cadEntry) throw new Error('ZIP does not contain DWG or DXF file');
+  if (!cadEntry) throw new Error('ZIP does not contain DWG, DXF, or DWF file');
 
   const extractedName = path.basename(cadEntry.entryName);
   const extractedPath = path.join(tmpDir, `extracted_${Date.now()}_${extractedName}`);
@@ -524,7 +557,7 @@ app.use(express.static('public'));
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '29.0.0',
+    version: '30.0.0',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured'
   });
@@ -592,9 +625,9 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
         fireSafety: analysis.reportData.fireSafety
       };
 
-    } else if (ext === '.dwg') {
-      // ===== DWG PATH: APS extraction =====
-      console.log('🏗️ DWG detected - using APS extraction');
+    } else if (ext === '.dwg' || ext === '.dwf') {
+      // ===== DWG/DWF PATH: APS extraction =====
+      console.log(`🏗️ ${ext.toUpperCase()} detected - using APS extraction`);
 
       if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
         throw new Error('APS credentials not configured. Use DXF format instead.');
@@ -621,7 +654,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       };
 
     } else {
-      throw new Error('Unsupported file format. Use DWG or DXF.');
+      throw new Error('Unsupported file format. Use DWG, DXF, or DWF.');
     }
 
     // Generate Claude report
