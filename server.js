@@ -1,7 +1,7 @@
 /**
- * Fire Safety Checker - Server v33
- * Pure local processing - NO APS dependency
- * DWG: Convert to DXF using libredwg (dwg2dxf)
+ * Fire Safety Checker - Server v34
+ * HYBRID: Local libredwg first, APS fallback
+ * DWG: Try dwg2dxf (libredwg) -> if fails, use APS
  * DXF: Direct parsing with dxf-analyzer
  * DWF: Extract from ZIP and parse embedded data
  */
@@ -30,6 +30,8 @@ app.use(express.json());
 app.use(cors({ origin: true, credentials: true }));
 
 // Environment variables
+const APS_CLIENT_ID = process.env.APS_CLIENT_ID;
+const APS_CLIENT_SECRET = process.env.APS_CLIENT_SECRET;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 // Directories
@@ -73,16 +75,23 @@ const FIRE_SAFETY_PROMPT = `אתה מומחה בטיחות אש ישראלי. נ
   "detailedReport": "דוח מפורט בעברית"
 }`;
 
+// ===== CHECK LIBREDWG AVAILABILITY =====
+function isLibredwgAvailable() {
+  try {
+    execSync('which dwg2dxf || where dwg2dxf 2>&1', { timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // ===== CONVERT DWG TO DXF USING LIBREDWG =====
 function convertDWGtoDXF(dwgPath) {
   const dxfPath = dwgPath.replace(/\.dwg$/i, '.dxf');
 
   console.log('🔄 Converting DWG to DXF using libredwg...');
-  console.log(`   Input: ${dwgPath}`);
-  console.log(`   Output: ${dxfPath}`);
 
   try {
-    // dwg2dxf outputs to same directory with .dxf extension
     execSync(`dwg2dxf "${dwgPath}"`, {
       timeout: 120000,
       stdio: ['pipe', 'pipe', 'pipe']
@@ -94,12 +103,11 @@ function convertDWGtoDXF(dwgPath) {
       return dxfPath;
     }
   } catch (err) {
-    console.log(`⚠️ dwg2dxf error: ${err.message}`);
+    console.log(`⚠️ dwg2dxf failed: ${err.message}`);
   }
 
-  // Try alternative: dwgread
+  // Try dwgread fallback
   try {
-    console.log('   Trying dwgread as fallback...');
     execSync(`dwgread -o "${dxfPath}" "${dwgPath}"`, {
       timeout: 120000,
       stdio: ['pipe', 'pipe', 'pipe']
@@ -111,45 +119,365 @@ function convertDWGtoDXF(dwgPath) {
       return dxfPath;
     }
   } catch (err2) {
-    console.log(`⚠️ dwgread error: ${err2.message}`);
+    console.log(`⚠️ dwgread failed: ${err2.message}`);
   }
 
-  throw new Error('Failed to convert DWG to DXF. libredwg may not be installed or the DWG file is corrupted.');
+  return null; // Return null to signal fallback to APS
 }
 
-// ===== EXTRACT DWF (ZIP-based format) =====
+// ===== APS AUTHENTICATION =====
+async function getAPSToken() {
+  if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
+    throw new Error('APS credentials not configured');
+  }
+
+  const resp = await fetch('https://developer.api.autodesk.com/authentication/v2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: APS_CLIENT_ID,
+      client_secret: APS_CLIENT_SECRET,
+      scope: 'data:read data:write data:create bucket:read bucket:create'
+    })
+  });
+
+  if (!resp.ok) throw new Error(`APS auth failed: ${resp.status}`);
+  const data = await resp.json();
+  return data.access_token;
+}
+
+// ===== APS BUCKET =====
+async function ensureBucket(token) {
+  const bucketKey = `firechecker-${APS_CLIENT_ID.toLowerCase().substring(0, 8)}`;
+
+  const checkResp = await fetch(
+    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/details`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
+
+  if (checkResp.ok) return bucketKey;
+
+  const createResp = await fetch('https://developer.api.autodesk.com/oss/v2/buckets', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ bucketKey, policyKey: 'transient' })
+  });
+
+  if (!createResp.ok && createResp.status !== 409) {
+    throw new Error(`Bucket creation failed: ${createResp.status}`);
+  }
+
+  return bucketKey;
+}
+
+// ===== APS UPLOAD =====
+async function uploadToAPS(token, bucketKey, filePath, fileName) {
+  const fileSize = fs.statSync(filePath).size;
+  const ext = path.extname(fileName).toLowerCase();
+  const safeFileName = `plan_${Date.now()}${ext}`;
+
+  console.log(`📤 Uploading to APS: ${fileName} -> ${safeFileName}`);
+
+  const PART_SIZE = 5 * 1024 * 1024;
+  const numParts = Math.ceil(fileSize / PART_SIZE);
+
+  const signedResp = await fetch(
+    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload?parts=${numParts}`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
+
+  if (!signedResp.ok) throw new Error(`Failed to get signed URLs: ${signedResp.status}`);
+  const signedData = await signedResp.json();
+
+  const fileData = fs.readFileSync(filePath);
+
+  for (let i = 0; i < numParts; i++) {
+    const start = i * PART_SIZE;
+    const end = Math.min(start + PART_SIZE, fileSize);
+    const partData = fileData.slice(start, end);
+
+    const partResp = await fetch(signedData.urls[i], {
+      method: 'PUT',
+      headers: { 'Content-Length': partData.length.toString() },
+      body: partData
+    });
+
+    if (!partResp.ok) throw new Error(`Part ${i + 1} upload failed`);
+    console.log(`   Part ${i + 1}/${numParts} ✓`);
+  }
+
+  const completeResp = await fetch(
+    `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${safeFileName}/signeds3upload`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ uploadKey: signedData.uploadKey })
+    }
+  );
+
+  if (!completeResp.ok) throw new Error('Upload completion failed');
+  const result = await completeResp.json();
+  const urn = Buffer.from(result.objectId).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  console.log(`✅ Upload complete. URN: ${urn.substring(0, 30)}...`);
+  return urn;
+}
+
+// ===== APS TRANSLATION =====
+async function translateToSVF2(token, urn) {
+  // Delete old manifest
+  try {
+    await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } }
+    );
+  } catch (e) {}
+
+  await new Promise(r => setTimeout(r, 3000));
+
+  console.log('🔄 Submitting translation job...');
+  const resp = await fetch('https://developer.api.autodesk.com/modelderivative/v2/designdata/job', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'x-ads-force': 'true'
+    },
+    body: JSON.stringify({
+      input: { urn },
+      output: { formats: [{ type: 'svf2', views: ['2d', '3d'] }] }
+    })
+  });
+
+  if (!resp.ok) {
+    const error = await resp.text();
+    throw new Error(`Translation job failed: ${resp.status} - ${error}`);
+  }
+
+  return await waitForTranslation(token, urn);
+}
+
+// ===== WAIT FOR TRANSLATION =====
+async function waitForTranslation(token, urn) {
+  const maxWait = 15 * 60 * 1000;
+  const start = Date.now();
+
+  while (Date.now() - start < maxWait) {
+    const resp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const manifest = await resp.json();
+
+    if (manifest.status === 'success' || manifest.status === 'complete') {
+      console.log('✅ Translation complete');
+      return manifest;
+    }
+
+    const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
+    if (svf2?.status === 'success') {
+      console.log('✅ SVF2 derivative complete');
+      return manifest;
+    }
+
+    if (manifest.status === 'failed') {
+      const errorMsg = manifest.derivatives?.find(d => d.status === 'failed')?.messages?.[0]?.message || 'Unknown error';
+      throw new Error(`Translation failed: ${errorMsg}`);
+    }
+
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    console.log(`   Translation: ${manifest.progress || '0%'} (${elapsed}s)`);
+    await new Promise(r => setTimeout(r, 5000));
+  }
+
+  throw new Error('Translation timeout');
+}
+
+// ===== APS METADATA EXTRACTION =====
+async function extractAPSData(token, urn) {
+  console.log('📊 Extracting APS metadata...');
+
+  // Wait for indexing
+  await new Promise(r => setTimeout(r, 10000));
+
+  // Get fresh token
+  const freshToken = await getAPSToken();
+
+  // Get metadata views (with retry)
+  let views = [];
+  for (let i = 0; i < 12; i++) {
+    const metaResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
+      { headers: { 'Authorization': `Bearer ${freshToken}` } }
+    );
+    const metadata = await metaResp.json();
+    views = metadata.data?.metadata || [];
+
+    if (views.length > 0) break;
+    console.log(`   Waiting for metadata... (attempt ${i + 1})`);
+    await new Promise(r => setTimeout(r, 10000));
+  }
+
+  console.log(`   Found ${views.length} views`);
+
+  if (views.length === 0) {
+    return { objects: [], treeSummary: {}, viewCount: 0 };
+  }
+
+  const validGuid = views[0].guid;
+  let allObjects = [];
+  let treeSummary = {};
+
+  // Get properties (with retry for 202)
+  console.log('   Fetching properties...');
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    const propsResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}/properties?forceget=true`,
+      { headers: { 'Authorization': `Bearer ${freshToken}` } }
+    );
+
+    if (propsResp.status === 200) {
+      const propsData = await propsResp.json();
+      allObjects = propsData.data?.collection || [];
+      console.log(`   ✅ Found ${allObjects.length} objects`);
+      break;
+    }
+
+    if (propsResp.status === 202) {
+      console.log(`   Properties processing... (attempt ${attempt})`);
+      await new Promise(r => setTimeout(r, 15000));
+      continue;
+    }
+
+    break;
+  }
+
+  // Get tree (with retry for 202)
+  console.log('   Fetching object tree...');
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    const treeResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata/${validGuid}?forceget=true`,
+      { headers: { 'Authorization': `Bearer ${freshToken}` } }
+    );
+
+    if (treeResp.status === 200) {
+      const treeData = await treeResp.json();
+      if (treeData?.data?.objects) {
+        const countTypes = (nodes) => {
+          nodes.forEach(n => {
+            treeSummary[n.name] = (treeSummary[n.name] || 0) + 1;
+            if (n.objects) countTypes(n.objects);
+          });
+        };
+        countTypes(treeData.data.objects);
+      }
+      break;
+    }
+
+    if (treeResp.status === 202) {
+      console.log(`   Tree processing... (attempt ${attempt})`);
+      await new Promise(r => setTimeout(r, 15000));
+      continue;
+    }
+
+    break;
+  }
+
+  return { objects: allObjects, treeSummary, viewCount: views.length };
+}
+
+// ===== BUILD APS REPORT TEXT =====
+function buildAPSReportText(apsData) {
+  const { objects, treeSummary, viewCount } = apsData;
+
+  const categories = {
+    sprinklers: [], smokeDetectors: [], fireDoors: [], exits: [],
+    fireExtinguishers: [], hydrants: [], texts: [], blocks: [], other: []
+  };
+
+  const patterns = {
+    sprinklers: /sprink|ספרינק|מתז|head/i,
+    smokeDetectors: /smoke|detector|גלאי|עשן/i,
+    fireDoors: /fire.?door|דלת.?אש/i,
+    exits: /exit|יציאה|מוצא/i,
+    fireExtinguishers: /extinguisher|מטף/i,
+    hydrants: /hydrant|הידרנט|ברז/i
+  };
+
+  objects.forEach(obj => {
+    const name = obj.name || '';
+    const props = obj.properties || {};
+    let categorized = false;
+
+    for (const [cat, pattern] of Object.entries(patterns)) {
+      if (pattern.test(name) || pattern.test(JSON.stringify(props))) {
+        categories[cat].push({ name, props });
+        categorized = true;
+        break;
+      }
+    }
+
+    if (!categorized) {
+      if (/text|mtext/i.test(name)) categories.texts.push({ name, props });
+      else if (/block|insert/i.test(name)) categories.blocks.push({ name, props });
+      else categories.other.push({ name, props });
+    }
+  });
+
+  let report = `=== נתוני DWG מ-APS ===
+
+סיכום:
+- אובייקטים: ${objects.length}
+- תצוגות: ${viewCount}
+
+מבנה:
+${Object.entries(treeSummary).slice(0, 20).map(([k, v]) => `  - ${k}: ${v}`).join('\n')}
+
+=== מערכות בטיחות אש ===
+ספרינקלרים: ${categories.sprinklers.length}
+גלאי עשן: ${categories.smokeDetectors.length}
+דלתות אש: ${categories.fireDoors.length}
+יציאות חירום: ${categories.exits.length}
+מטפי כיבוי: ${categories.fireExtinguishers.length}
+הידרנטים: ${categories.hydrants.length}
+
+=== טקסטים ===
+${categories.texts.slice(0, 50).map(t => `- ${t.name}`).join('\n')}
+
+=== בלוקים ===
+${categories.blocks.slice(0, 50).map(b => `- ${b.name}`).join('\n')}
+`;
+
+  return { report, categories };
+}
+
+// ===== EXTRACT DWF =====
 function extractDWF(dwfPath) {
-  console.log('📦 Extracting DWF file (ZIP-based format)...');
+  console.log('📦 Extracting DWF...');
 
   const zip = new AdmZip(dwfPath);
   const entries = zip.getEntries();
 
-  console.log(`   Found ${entries.length} entries in DWF:`);
-
-  let extractedData = {
-    manifest: null,
-    sections: [],
-    graphics: [],
-    texts: []
-  };
+  let extractedData = { manifest: null, sections: [], graphics: [], texts: [] };
 
   entries.forEach(entry => {
     const name = entry.entryName;
-    const size = entry.header.size;
-    console.log(`   - ${name} (${size} bytes)`);
 
-    // Look for manifest.xml
     if (name.toLowerCase().includes('manifest') && name.endsWith('.xml')) {
       extractedData.manifest = entry.getData().toString('utf8');
     }
 
-    // Look for section XML files
     if (name.endsWith('.xml') && !name.includes('manifest')) {
       try {
         const content = entry.getData().toString('utf8');
         extractedData.sections.push({ name, content });
-
-        // Extract text content from XML
         const textMatches = content.match(/<Text[^>]*>([^<]+)<\/Text>/gi) || [];
         textMatches.forEach(match => {
           const text = match.replace(/<[^>]+>/g, '').trim();
@@ -158,41 +486,19 @@ function extractDWF(dwfPath) {
       } catch (e) {}
     }
 
-    // Track graphics files (w2d, f2d)
     if (name.match(/\.(w2d|f2d)$/i)) {
-      extractedData.graphics.push({ name, size });
+      extractedData.graphics.push({ name, size: entry.header.size });
     }
   });
-
-  console.log(`✅ Extracted: ${extractedData.sections.length} sections, ${extractedData.texts.length} texts, ${extractedData.graphics.length} graphics`);
 
   return extractedData;
 }
 
-// ===== BUILD DWF REPORT TEXT =====
+// ===== BUILD DWF REPORT =====
 function buildDWFReportText(dwfData) {
-  let report = `=== נתוני קובץ DWF ===
-
-מבנה הקובץ:
-- קבצי גרפיקה: ${dwfData.graphics.length}
-- סקשנים: ${dwfData.sections.length}
-- טקסטים שזוהו: ${dwfData.texts.length}
-
-=== טקסטים שנמצאו ===
-${dwfData.texts.slice(0, 100).join('\n')}
-
-=== קבצי גרפיקה ===
-${dwfData.graphics.map(g => `- ${g.name} (${(g.size / 1024).toFixed(1)} KB)`).join('\n')}
-`;
-
-  // Try to identify fire safety elements from texts
   const fireSafety = {
-    sprinklers: 0,
-    smokeDetectors: 0,
-    exits: 0,
-    fireDoors: 0,
-    extinguishers: 0,
-    hydrants: 0
+    sprinklers: 0, smokeDetectors: 0, exits: 0,
+    fireDoors: 0, extinguishers: 0, hydrants: 0
   };
 
   dwfData.texts.forEach(text => {
@@ -205,14 +511,21 @@ ${dwfData.graphics.map(g => `- ${g.name} (${(g.size / 1024).toFixed(1)} KB)`).jo
     if (/hydrant|הידרנט|ברז.?כיבוי/.test(lower)) fireSafety.hydrants++;
   });
 
-  report += `
-=== מערכות בטיחות אש שזוהו ===
-- ספרינקלרים: ${fireSafety.sprinklers}
-- גלאי עשן: ${fireSafety.smokeDetectors}
-- יציאות חירום: ${fireSafety.exits}
-- דלתות אש: ${fireSafety.fireDoors}
-- מטפי כיבוי: ${fireSafety.extinguishers}
-- הידרנטים: ${fireSafety.hydrants}
+  let report = `=== נתוני DWF ===
+גרפיקה: ${dwfData.graphics.length}
+סקשנים: ${dwfData.sections.length}
+טקסטים: ${dwfData.texts.length}
+
+=== טקסטים ===
+${dwfData.texts.slice(0, 100).join('\n')}
+
+=== בטיחות אש ===
+ספרינקלרים: ${fireSafety.sprinklers}
+גלאי עשן: ${fireSafety.smokeDetectors}
+יציאות: ${fireSafety.exits}
+דלתות אש: ${fireSafety.fireDoors}
+מטפים: ${fireSafety.extinguishers}
+הידרנטים: ${fireSafety.hydrants}
 `;
 
   return { report, fireSafety };
@@ -281,19 +594,13 @@ app.use(express.static('public'));
 
 // ===== API ROUTES =====
 app.get('/api/health', (req, res) => {
-  // Check if libredwg is available
-  let libredwg = false;
-  try {
-    execSync('dwg2dxf --version 2>&1 || true', { timeout: 5000 });
-    libredwg = true;
-  } catch (e) {}
-
   res.json({
     status: 'ok',
-    version: '33.0.0',
-    libredwg: libredwg ? 'installed' : 'not installed',
+    version: '34.0.0',
+    libredwg: isLibredwgAvailable() ? 'installed' : 'not installed',
+    aps: APS_CLIENT_ID ? 'configured (fallback)' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured',
-    mode: 'Local processing (no APS)'
+    mode: 'Hybrid: libredwg primary, APS fallback'
   });
 });
 
@@ -306,10 +613,7 @@ app.post('/api/upload-instructions', instructionUpload.single('instructionFile')
     else if ((ext === '.docx' || ext === '.doc') && mammoth) content = (await mammoth.extractRawText({ path: req.file.path })).value;
     else if ((ext === '.xlsx' || ext === '.xls') && XLSX) {
       const workbook = XLSX.readFile(req.file.path);
-      content = workbook.SheetNames.map(name => {
-        const sheet = workbook.Sheets[name];
-        return XLSX.utils.sheet_to_csv(sheet);
-      }).join('\n\n');
+      content = workbook.SheetNames.map(name => XLSX.utils.sheet_to_csv(workbook.Sheets[name])).join('\n\n');
     }
     else content = fs.readFileSync(req.file.path, 'utf8');
 
@@ -340,7 +644,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     console.log('\n========================================');
-    console.log('🔥 FIRE SAFETY ANALYSIS v33 (Local)');
+    console.log('🔥 FIRE SAFETY ANALYSIS v34 (Hybrid)');
     console.log(`📁 ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)}MB)`);
     console.log('========================================\n');
 
@@ -353,22 +657,66 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     let ext = path.extname(originalName).toLowerCase();
     let reportText, analysisData;
 
-    // ===== DWG: Convert to DXF first =====
+    // ===== DWG: Try libredwg first, then APS fallback =====
     if (ext === '.dwg') {
-      console.log('📐 DWG detected - converting to DXF with libredwg');
-      const dxfPath = convertDWGtoDXF(filePath);
-      tempFiles.push(dxfPath);
-      filePath = dxfPath;
-      ext = '.dxf';
+      console.log('📐 DWG detected');
+
+      // Try libredwg first
+      if (isLibredwgAvailable()) {
+        console.log('   Trying libredwg conversion...');
+        const dxfPath = convertDWGtoDXF(filePath);
+
+        if (dxfPath) {
+          tempFiles.push(dxfPath);
+          console.log('   ✅ Libredwg succeeded, parsing DXF...');
+          const analysis = await analyzeDXFComplete(dxfPath);
+          reportText = analysis.reportText;
+          analysisData = {
+            method: 'libredwg + DXF Parsing',
+            entities: analysis.parsed.totalEntities,
+            layers: Object.keys(analysis.tree.layers).length,
+            texts: analysis.parsed.texts.length,
+            fireSafety: analysis.reportData.fireSafety
+          };
+        }
+      }
+
+      // APS fallback if libredwg failed or unavailable
+      if (!reportText) {
+        if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
+          throw new Error('libredwg failed and APS not configured. Cannot process DWG file.');
+        }
+
+        console.log('   ⚠️ Libredwg unavailable/failed, using APS fallback...');
+        const token = await getAPSToken();
+        const bucketKey = await ensureBucket(token);
+        const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
+        await translateToSVF2(token, urn);
+        const apsData = await extractAPSData(token, urn);
+        const apsReport = buildAPSReportText(apsData);
+
+        reportText = apsReport.report;
+        analysisData = {
+          method: 'APS Cloud Extraction',
+          objects: apsData.objects.length,
+          views: apsData.viewCount,
+          fireSafety: {
+            sprinklers: { count: apsReport.categories.sprinklers.length },
+            smokeDetectors: { count: apsReport.categories.smokeDetectors.length },
+            fireDoors: { count: apsReport.categories.fireDoors.length },
+            exits: { count: apsReport.categories.exits.length }
+          }
+        };
+      }
     }
 
     // ===== DXF: Direct parsing =====
-    if (ext === '.dxf') {
-      console.log('📐 Parsing DXF with vector analyzer...');
+    else if (ext === '.dxf') {
+      console.log('📐 Parsing DXF...');
       const analysis = await analyzeDXFComplete(filePath);
       reportText = analysis.reportText;
       analysisData = {
-        method: 'DXF Vector Parsing (Local)',
+        method: 'DXF Vector Parsing',
         entities: analysis.parsed.totalEntities,
         layers: Object.keys(analysis.tree.layers).length,
         texts: analysis.parsed.texts.length,
@@ -376,14 +724,14 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       };
     }
 
-    // ===== DWF: Extract ZIP and parse =====
+    // ===== DWF: Extract and parse =====
     else if (ext === '.dwf') {
-      console.log('📦 DWF detected - extracting embedded data...');
+      console.log('📦 Extracting DWF...');
       const dwfData = extractDWF(filePath);
       const dwfReport = buildDWFReportText(dwfData);
       reportText = dwfReport.report;
       analysisData = {
-        method: 'DWF Extraction (Local)',
+        method: 'DWF Extraction',
         graphics: dwfData.graphics.length,
         sections: dwfData.sections.length,
         texts: dwfData.texts.length,
@@ -392,7 +740,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     }
 
     else {
-      throw new Error('Unsupported file format. Use DWG, DXF, or DWF.');
+      throw new Error('Unsupported format. Use DWG, DXF, or DWF.');
     }
 
     // Generate Claude report
@@ -429,25 +777,19 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 // ===== START SERVER =====
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
-  // Check libredwg availability
-  let libredwgStatus = 'not installed';
-  try {
-    execSync('which dwg2dxf || where dwg2dxf 2>&1', { timeout: 5000 });
-    libredwgStatus = 'installed';
-  } catch (e) {}
+  const libredwg = isLibredwgAvailable();
 
   console.log('\n========================================');
-  console.log('🔥 FIRE SAFETY CHECKER v33');
+  console.log('🔥 FIRE SAFETY CHECKER v34 (Hybrid)');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📐 DXF: Direct vector parsing`);
-  console.log(`🔄 DWG: libredwg conversion (${libredwgStatus})`);
+  console.log(`🔄 DWG Primary: libredwg (${libredwg ? '✅ installed' : '❌ not installed'})`);
+  console.log(`☁️  DWG Fallback: APS (${APS_CLIENT_ID ? '✅ configured' : '❌ not configured'})`);
   console.log(`📦 DWF: ZIP extraction`);
-  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? 'ready' : 'not configured'}`);
-  console.log('========================================');
-  console.log('✅ NO APS DEPENDENCY - Pure local processing');
+  console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? '✅ ready' : '❌ not configured'}`);
   console.log('========================================\n');
 });
 
-server.timeout = 900000; // 15 minutes
-server.keepAliveTimeout = 600000; // 10 minutes
+server.timeout = 900000;
+server.keepAliveTimeout = 600000;
