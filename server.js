@@ -1,8 +1,14 @@
 /**
- * Fire Safety Checker - Server v36
+ * Fire Safety & Compliance Checker - Server v37
+ *
+ * TWO MODES:
+ * 1. Fire Safety Mode - Existing functionality
+ * 2. Compliance Mode - Building permit compliance checking
+ *    - Upload reference docs (תקנון, גליון דרישות) → Extract requirements
+ *    - Upload plans → Check against extracted requirements
+ *
  * HIGH-RES VISION: Puppeteer captures 4096x4096 screenshot from APS Viewer
  * Splits into 9 zones + full image -> Claude Vision analysis
- * NEW: Preview API for full image + zone display in frontend
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Direct parsing (fallback)
  */
@@ -64,10 +70,104 @@ const upload = multer({
 
 const instructionUpload = multer({ dest: uploadsDir, limits: { fileSize: 50 * 1024 * 1024 } });
 
+// Reference document upload (for compliance mode)
+const referenceUpload = multer({
+  dest: uploadsDir,
+  limits: { fileSize: 100 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.pdf', '.doc', '.docx', '.xlsx', '.xls', '.txt'].includes(ext)) cb(null, true);
+    else cb(new Error('נתמכים רק קבצי PDF, Word, Excel או טקסט'));
+  }
+});
+
 let savedInstructions = [];
 
 // Store screenshots and zones in memory for serving
 const screenshotCache = new Map();
+
+// ===== PROJECT STORAGE FOR COMPLIANCE MODE =====
+const projects = new Map();
+
+// Cleanup projects older than 24 hours
+setInterval(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [id, project] of projects) {
+    if (project.createdAt < cutoff) {
+      console.log(`🧹 Cleaning up old project: ${id}`);
+      projects.delete(id);
+    }
+  }
+}, 60 * 60 * 1000);
+
+// ===== COMPLIANCE PROMPTS =====
+const REFERENCE_EXTRACTION_PROMPT = `אתה מומחה היתרי בנייה ישראלי. קרא את מסמך הייחוס הזה וחלץ רשימה מובנית של כל הדרישות, כללים ותנאים שמוזכרים.
+
+לכל דרישה חלץ:
+- id: מזהה קצר וייחודי (בפורמט REQ-001, REQ-002 וכו')
+- category: קטגוריה/שלב (קליטת בקשה, בקרת תכן, טופס 2, טופס 4, כללי)
+- description_he: הדרישה בעברית
+- check_type: סוג הבדיקה - אחד מ:
+  - 'visual_plan_check' - בדיקה ויזואלית בתכנית
+  - 'document_exists' - בדיקת קיום מסמך
+  - 'measurement_check' - בדיקת מידות/שטחים
+  - 'marking_check' - בדיקת סימון בתכנית
+  - 'manual' - בדיקה ידנית נדרשת
+- details: פרטים ספציפיים (ערכים, מידות)
+- regulation_reference: הפניה לחוק/תקן (אם יש)
+
+בנוסף, חלץ גבולות מספריים:
+- max_building_area: שטח בנייה מותר
+- max_coverage: תכסית מקסימלית (%)
+- max_floors: מספר קומות מקסימלי
+- max_height: גובה מקסימלי (מ')
+- setbacks: קווי בניין (מטרים)
+- parking_ratio: יחס חניה (מ"ר לחניה)
+- landscape_ratio: שטח גינון (%)
+
+החזר JSON בפורמט:
+{
+  "requirements": [...],
+  "numericLimits": {...},
+  "projectInfo": {
+    "taba_number": "מספר תב\"ע",
+    "location": "מיקום",
+    "permitted_uses": ["שימושים מותרים"]
+  }
+}`;
+
+const COMPLIANCE_CHECK_PROMPT = `אתה בודק היתרי בנייה ישראלי. בדוק את התכנית הזו מול הדרישות הבאות.
+
+=== דרישות לבדיקה ===
+{REQUIREMENTS}
+
+=== גבולות מספריים ===
+{NUMERIC_LIMITS}
+
+לכל דרישה קבע:
+- requirementId: המזהה מהרשימה
+- status: אחד מ:
+  - 'pass' - התכנית עומדת בדרישה
+  - 'fail' - התכנית לא עומדת בדרישה
+  - 'needs_review' - נדרשת בדיקה ידנית
+  - 'not_applicable' - לא רלוונטי לתכנית זו
+- finding_he: מה מצאת (בעברית)
+- confidence: רמת ביטחון 0-100
+- location_in_plan: איפה בתכנית (אם רלוונטי)
+
+גם זהה:
+- plan_type: סוג התכנית (קומת קרקע, חזית, חתך, מפלס וכו')
+- detected_measurements: מידות שזוהו
+- potential_issues: בעיות פוטנציאליות שלא קשורות לדרישות
+
+החזר JSON בפורמט:
+{
+  "planType": "...",
+  "results": [...],
+  "detectedMeasurements": {...},
+  "potentialIssues": [...],
+  "overallCompliance": 0-100
+}`;
 
 // ===== FIRE SAFETY VISION PROMPT =====
 const FIRE_SAFETY_VISION_PROMPT = `אתה מומחה בטיחות אש ישראלי. לפניך תוכנית אדריכלית ברזולוציה גבוהה.
@@ -553,12 +653,13 @@ app.use(express.static('public'));
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '36.0.0',
+    version: '37.0.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured',
-    mode: 'High-Res Vision Analysis'
+    modes: ['fire-safety', 'compliance'],
+    activeProjects: projects.size
   });
 });
 
@@ -636,6 +737,372 @@ app.get('/api/preview/:id', (req, res) => {
     res.send(cached.full);
   } else {
     res.status(404).json({ error: 'Image not found' });
+  }
+});
+
+// ===== COMPLIANCE MODE: REFERENCE UPLOAD =====
+app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), async (req, res) => {
+  const startTime = Date.now();
+  let tempFiles = [];
+
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'לא הועלו קבצים' });
+    }
+
+    console.log('\n========================================');
+    console.log('📋 COMPLIANCE MODE - Reference Upload');
+    console.log(`📁 ${req.files.length} files uploaded`);
+    console.log('========================================\n');
+
+    // Extract text from all files
+    let allText = '';
+    const fileNames = [];
+
+    for (const file of req.files) {
+      tempFiles.push(file.path);
+      const ext = path.extname(file.originalname).toLowerCase();
+      fileNames.push(file.originalname);
+      let content = '';
+
+      try {
+        if (ext === '.pdf' && pdfParse) {
+          const pdfData = await pdfParse(fs.readFileSync(file.path));
+          content = pdfData.text;
+        } else if ((ext === '.docx' || ext === '.doc') && mammoth) {
+          const result = await mammoth.extractRawText({ path: file.path });
+          content = result.value;
+        } else if ((ext === '.xlsx' || ext === '.xls') && XLSX) {
+          const workbook = XLSX.readFile(file.path);
+          content = workbook.SheetNames.map(name => {
+            const sheet = workbook.Sheets[name];
+            return XLSX.utils.sheet_to_txt(sheet);
+          }).join('\n');
+        } else {
+          content = fs.readFileSync(file.path, 'utf8');
+        }
+
+        allText += `\n\n=== ${file.originalname} ===\n${content}`;
+        console.log(`   ✓ ${file.originalname}: ${content.length} chars`);
+      } catch (e) {
+        console.log(`   ✗ ${file.originalname}: ${e.message}`);
+      }
+    }
+
+    if (!allText.trim()) {
+      throw new Error('לא ניתן היה לחלץ טקסט מהקבצים');
+    }
+
+    console.log(`📄 Total extracted: ${allText.length} chars`);
+
+    // Send to Claude for requirement extraction
+    console.log('🤖 Sending to Claude for requirement extraction...');
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 8000,
+        messages: [{
+          role: 'user',
+          content: `${REFERENCE_EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText.substring(0, 100000)}`
+        }]
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw new Error(`Claude API error: ${resp.status} - ${err}`);
+    }
+
+    const data = await resp.json();
+    const content = data.content[0].text;
+
+    // Parse JSON response
+    let extracted;
+    try {
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        extracted = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('No JSON in response');
+      }
+    } catch (e) {
+      console.log('   JSON parse failed, creating minimal structure');
+      extracted = {
+        requirements: [],
+        numericLimits: {},
+        projectInfo: {}
+      };
+    }
+
+    // Create project
+    const projectId = uuidv4();
+    const project = {
+      id: projectId,
+      createdAt: Date.now(),
+      fileNames,
+      requirements: extracted.requirements || [],
+      numericLimits: extracted.numericLimits || {},
+      projectInfo: extracted.projectInfo || {},
+      planResults: []
+    };
+
+    projects.set(projectId, project);
+
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ Extracted ${project.requirements.length} requirements in ${totalTime}s`);
+
+    // Cleanup temp files
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
+
+    res.json({
+      success: true,
+      projectId,
+      fileNames,
+      requirementsExtracted: project.requirements.length,
+      requirements: project.requirements,
+      numericLimits: project.numericLimits,
+      projectInfo: project.projectInfo,
+      processingTime: `${totalTime}s`
+    });
+
+  } catch (error) {
+    console.error('❌ Error:', error.message);
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== COMPLIANCE MODE: GET PROJECT =====
+app.get('/api/reference/:projectId', (req, res) => {
+  const project = projects.get(req.params.projectId);
+
+  if (!project) {
+    return res.status(404).json({ error: 'פרויקט לא נמצא' });
+  }
+
+  res.json({
+    success: true,
+    projectId: project.id,
+    createdAt: project.createdAt,
+    fileNames: project.fileNames,
+    requirementsCount: project.requirements.length,
+    requirements: project.requirements,
+    numericLimits: project.numericLimits,
+    projectInfo: project.projectInfo,
+    planResults: project.planResults
+  });
+});
+
+// ===== COMPLIANCE MODE: ANALYZE PLAN =====
+app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
+  const startTime = Date.now();
+  let tempFiles = [];
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'לא הועלה קובץ תכנית' });
+    }
+
+    const projectId = req.body.projectId;
+    if (!projectId) {
+      return res.status(400).json({ error: 'חסר מזהה פרויקט' });
+    }
+
+    const project = projects.get(projectId);
+    if (!project) {
+      return res.status(404).json({ error: 'פרויקט לא נמצא - יש להעלות מסמכי ייחוס תחילה' });
+    }
+
+    console.log('\n========================================');
+    console.log('📐 COMPLIANCE MODE - Plan Analysis');
+    console.log(`📁 ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)}MB)`);
+    console.log(`📋 Project: ${projectId} (${project.requirements.length} requirements)`);
+    console.log('========================================\n');
+
+    tempFiles.push(req.file.path);
+
+    // Extract from ZIP if needed
+    let { filePath, originalName } = extractFromZip(req.file.path, req.file.originalname);
+    if (filePath !== req.file.path) tempFiles.push(filePath);
+
+    const ext = path.extname(originalName).toLowerCase();
+    let fullImage, zones, screenshotUrl, screenshotId;
+
+    // ===== DWG/DWF: High-Res Vision Pipeline =====
+    if ((ext === '.dwg' || ext === '.dwf') && puppeteer && sharp && APS_CLIENT_ID) {
+      console.log('🎯 Using High-Res Vision Pipeline');
+
+      // APS Upload & Translate
+      const token = await getAPSToken();
+      const bucketKey = await ensureBucket(token);
+      const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
+      await translateToSVF2(token, urn);
+
+      // Get fresh token for viewer
+      const viewerToken = await getAPSToken();
+
+      // Capture high-res screenshot
+      screenshotId = uuidv4();
+      const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+      fullImage = await captureHighResScreenshot(viewerToken, urn, screenshotPath);
+
+      screenshotUrl = `/screenshots/${screenshotId}.png`;
+      zones = await splitIntoZones(fullImage);
+      screenshotCache.set(screenshotId, { full: fullImage, zones });
+    }
+    // ===== DXF: Parse and render =====
+    else if (ext === '.dxf') {
+      console.log('📐 DXF: Direct analysis');
+      // For DXF, we'll analyze without image for now
+      fullImage = null;
+      zones = [];
+    }
+    else {
+      throw new Error('פורמט לא נתמך. השתמש ב-DWG, DXF או DWF.');
+    }
+
+    // Build compliance check prompt
+    const requirementsJson = JSON.stringify(project.requirements.slice(0, 50), null, 2);
+    const limitsJson = JSON.stringify(project.numericLimits, null, 2);
+    const compliancePrompt = COMPLIANCE_CHECK_PROMPT
+      .replace('{REQUIREMENTS}', requirementsJson)
+      .replace('{NUMERIC_LIMITS}', limitsJson);
+
+    console.log('🤖 Sending to Claude for compliance check...');
+
+    let complianceResult;
+
+    if (fullImage && zones.length > 0) {
+      // Vision-based analysis
+      const images = [fullImage, ...zones].map(buf => ({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: "image/png",
+          data: buf.toString('base64')
+        }
+      }));
+
+      const textContent = {
+        type: "text",
+        text: `${compliancePrompt}\n\nהתמונה הראשונה היא התכנית המלאה. 9 התמונות הבאות הן זומים על אזורים שונים.`
+      };
+
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 8000,
+          messages: [{
+            role: 'user',
+            content: [...images, textContent]
+          }]
+        })
+      });
+
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(`Claude API error: ${resp.status} - ${err}`);
+      }
+
+      const data = await resp.json();
+      const content = data.content[0].text;
+
+      try {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          complianceResult = JSON.parse(jsonMatch[0]);
+        }
+      } catch (e) {
+        complianceResult = { results: [], overallCompliance: 50, planType: 'לא ידוע' };
+      }
+    } else {
+      // Text-based analysis for DXF
+      const analysis = await analyzeDXFComplete(filePath);
+
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 8000,
+          messages: [{
+            role: 'user',
+            content: `${compliancePrompt}\n\n=== נתוני DXF ===\n${analysis.reportText}`
+          }]
+        })
+      });
+
+      if (!resp.ok) throw new Error(`Claude API error: ${resp.status}`);
+      const data = await resp.json();
+      const content = data.content[0].text;
+
+      try {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          complianceResult = JSON.parse(jsonMatch[0]);
+        }
+      } catch (e) {
+        complianceResult = { results: [], overallCompliance: 50, planType: 'לא ידוע' };
+      }
+    }
+
+    // Store result in project
+    const planResult = {
+      id: uuidv4(),
+      fileName: originalName,
+      analyzedAt: Date.now(),
+      screenshotUrl,
+      screenshotId,
+      planType: complianceResult.planType || 'לא ידוע',
+      results: complianceResult.results || [],
+      overallCompliance: complianceResult.overallCompliance || 0,
+      detectedMeasurements: complianceResult.detectedMeasurements || {},
+      potentialIssues: complianceResult.potentialIssues || []
+    };
+
+    project.planResults.push(planResult);
+
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ Compliance check complete in ${totalTime}s - Score: ${planResult.overallCompliance}%`);
+
+    // Cleanup temp files
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
+
+    res.json({
+      success: true,
+      planId: planResult.id,
+      fileName: originalName,
+      planType: planResult.planType,
+      screenshotUrl,
+      screenshotId,
+      results: planResult.results,
+      overallCompliance: planResult.overallCompliance,
+      detectedMeasurements: planResult.detectedMeasurements,
+      potentialIssues: planResult.potentialIssues,
+      processingTime: `${totalTime}s`
+    });
+
+  } catch (error) {
+    console.error('❌ Error:', error.message);
+    tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -780,7 +1247,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🔥 FIRE SAFETY CHECKER v36 (Vision + Preview)');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
@@ -788,8 +1255,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`☁️  APS: ${APS_CLIENT_ID ? '✅ configured' : '❌ not configured'}`);
   console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? '✅ ready' : '❌ not configured'}`);
   console.log('========================================');
-  console.log('📐 DWG/DWF: APS → Puppeteer → 4096px → Vision');
-  console.log('📄 DXF: Direct parsing → Claude');
+  console.log('🔥 Fire Safety Mode: DWG → Vision Analysis');
+  console.log('📋 Compliance Mode: Reference Docs → Requirements → Plan Check');
   console.log('========================================\n');
 });
 

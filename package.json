@@ -1,7 +1,7 @@
 {
   "name": "fire-safety-checker",
-  "version": "36.0.0",
-  "description": "Fire Safety Plan Checker - High-Res Vision Analysis",
+  "version": "37.0.0",
+  "description": "Fire Safety & Building Permit Compliance Checker",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
