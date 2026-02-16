@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.3
+ * Fire Safety & Compliance Checker - Server v37.4
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Direct parsing with vector rendering
  *
- * v37.3: Improved error handling when DWG tools unavailable
+ * v37.4: Fixed vector bounds calculation - use percentile-based bounds to exclude outliers
  */
 
 const express = require('express');
@@ -608,51 +608,130 @@ async function renderVectorsToImage(parsed, classified, outputPath) {
 
   console.log('🎨 Rendering vectors to image...');
 
-  // Calculate bounds
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  // Collect all coordinates for percentile-based bounds
+  const xs = [];
+  const ys = [];
 
-  const updateBounds = (x, y) => {
+  const addPoint = (x, y) => {
     if (x !== undefined && y !== undefined && isFinite(x) && isFinite(y)) {
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
+      xs.push(x);
+      ys.push(y);
     }
   };
 
-  // Gather all points
-  parsed.lines.forEach(l => { updateBounds(l.x, l.y); updateBounds(l.x2, l.y2); });
+  // Gather all points from entities
+  parsed.lines.forEach(l => {
+    addPoint(l.x, l.y);
+    addPoint(l.x2, l.y2);
+  });
   parsed.circles.forEach(c => {
-    updateBounds(c.x - c.radius, c.y - c.radius);
-    updateBounds(c.x + c.radius, c.y + c.radius);
+    if (c.x !== undefined && c.y !== undefined && c.radius > 0) {
+      addPoint(c.x - c.radius, c.y - c.radius);
+      addPoint(c.x + c.radius, c.y + c.radius);
+      addPoint(c.x, c.y);
+    }
   });
-  parsed.arcs.forEach(a => { updateBounds(a.x, a.y); });
+  parsed.arcs.forEach(a => {
+    if (a.x !== undefined && a.y !== undefined && a.radius > 0) {
+      addPoint(a.x - a.radius, a.y - a.radius);
+      addPoint(a.x + a.radius, a.y + a.radius);
+    }
+  });
   parsed.polylines.forEach(p => {
-    (p.vertices || []).forEach(v => updateBounds(v.x, v.y));
+    (p.vertices || []).forEach(v => addPoint(v.x, v.y));
   });
-  parsed.texts.forEach(t => updateBounds(t.x, t.y));
-  parsed.blockRefs.forEach(b => updateBounds(b.x, b.y));
+  parsed.texts.forEach(t => addPoint(t.x, t.y));
+  parsed.blockRefs.forEach(b => addPoint(b.x, b.y));
 
-  if (!isFinite(minX) || !isFinite(maxX)) {
-    console.log('⚠️ No valid geometry bounds found');
+  console.log(`   Total coordinate points: ${xs.length}`);
+
+  if (xs.length < 4) {
+    console.log('⚠️ Not enough geometry points found');
     return null;
   }
 
+  // Sort for percentile calculation
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+
+  // Use 2nd/98th percentile to exclude outliers
+  const loIdx = Math.floor(xs.length * 0.02);
+  const hiIdx = Math.min(xs.length - 1, Math.floor(xs.length * 0.98));
+
+  let minX = xs[loIdx];
+  let maxX = xs[hiIdx];
+  let minY = ys[loIdx];
+  let maxY = ys[hiIdx];
+
+  let boundsWidth = maxX - minX;
+  let boundsHeight = maxY - minY;
+
+  console.log(`   Percentile bounds: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
+  console.log(`   Bounds size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
+
+  // If bounds are too small, try to find densest cluster
+  if (boundsWidth < 1.0 || boundsHeight < 1.0) {
+    console.log('⚠️ Bounds too small, finding densest cluster...');
+
+    // Use IQR (25th to 75th percentile) as fallback
+    const q1Idx = Math.floor(xs.length * 0.25);
+    const q3Idx = Math.floor(xs.length * 0.75);
+
+    minX = xs[q1Idx];
+    maxX = xs[q3Idx];
+    minY = ys[q1Idx];
+    maxY = ys[q3Idx];
+
+    boundsWidth = maxX - minX;
+    boundsHeight = maxY - minY;
+
+    console.log(`   IQR bounds: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
+    console.log(`   IQR size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
+
+    // If still too small, use full range with some margin
+    if (boundsWidth < 1.0 || boundsHeight < 1.0) {
+      minX = xs[0];
+      maxX = xs[xs.length - 1];
+      minY = ys[0];
+      maxY = ys[ys.length - 1];
+      boundsWidth = maxX - minX;
+      boundsHeight = maxY - minY;
+      console.log(`   Using full range: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
+    }
+  }
+
+  // Add 5% padding to bounds
+  const padX = boundsWidth * 0.05;
+  const padY = boundsHeight * 0.05;
+  minX -= padX;
+  maxX += padX;
+  minY -= padY;
+  maxY += padY;
+
+  boundsWidth = maxX - minX;
+  boundsHeight = maxY - minY;
+
+  console.log(`   Final bounds with padding: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
+  console.log(`   Final size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
+
   // Image dimensions
-  const padding = 50;
+  const imgPadding = 50;
   const maxDim = 4096;
-  const width = maxX - minX;
-  const height = maxY - minY;
-  const scale = Math.min((maxDim - 2 * padding) / width, (maxDim - 2 * padding) / height);
-  const imgWidth = Math.min(maxDim, Math.ceil(width * scale + 2 * padding));
-  const imgHeight = Math.min(maxDim, Math.ceil(height * scale + 2 * padding));
+  const scale = Math.min((maxDim - 2 * imgPadding) / boundsWidth, (maxDim - 2 * imgPadding) / boundsHeight);
+  const imgWidth = Math.min(maxDim, Math.ceil(boundsWidth * scale + 2 * imgPadding));
+  const imgHeight = Math.min(maxDim, Math.ceil(boundsHeight * scale + 2 * imgPadding));
 
-  console.log(`   Bounds: (${minX.toFixed(0)}, ${minY.toFixed(0)}) to (${maxX.toFixed(0)}, ${maxY.toFixed(0)})`);
-  console.log(`   Image size: ${imgWidth}x${imgHeight}, scale: ${scale.toFixed(4)}`);
+  console.log(`   Image: ${imgWidth}x${imgHeight}, scale: ${scale.toFixed(4)}`);
 
-  // Transform function
-  const tx = (x) => padding + (x - minX) * scale;
-  const ty = (y) => imgHeight - padding - (y - minY) * scale; // Flip Y
+  // Transform function - clamp to image bounds
+  const tx = (x) => {
+    const px = imgPadding + (x - minX) * scale;
+    return Math.max(0, Math.min(imgWidth, px));
+  };
+  const ty = (y) => {
+    const py = imgHeight - imgPadding - (y - minY) * scale; // Flip Y
+    return Math.max(0, Math.min(imgHeight, py));
+  };
 
   // Build SVG
   let svgPaths = [];
@@ -931,7 +1010,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.3.0',
+    version: '37.4.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
@@ -1674,7 +1753,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.3');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.4');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
