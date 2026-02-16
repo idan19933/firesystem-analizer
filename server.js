@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37
+ * Fire Safety & Compliance Checker - Server v37.3
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -10,7 +10,9 @@
  * HIGH-RES VISION: Puppeteer captures 4096x4096 screenshot from APS Viewer
  * Splits into 9 zones + full image -> Claude Vision analysis
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
- * DXF: Direct parsing (fallback)
+ * DXF: Direct parsing with vector rendering
+ *
+ * v37.3: Improved error handling when DWG tools unavailable
  */
 
 const express = require('express');
@@ -508,40 +510,92 @@ async function captureHighResScreenshot(token, urn, outputPath) {
 
 // ===== CONVERT DWG TO DXF =====
 async function convertDWGtoDXF(dwgPath) {
-  const dxfPath = dwgPath.replace(/\.dwg$/i, '.dxf');
+  const baseName = path.basename(dwgPath, path.extname(dwgPath));
+  const dirName = path.dirname(dwgPath);
+  const dxfPath = path.join(dirName, baseName + '.dxf');
 
-  console.log('🔄 Converting DWG to DXF using dwg2dxf...');
+  console.log('🔄 Attempting DWG to DXF conversion...');
 
-  try {
-    // Try dwg2dxf from libredwg-tools
-    execSync(`dwg2dxf "${dwgPath}" -o "${dxfPath}"`, {
-      timeout: 60000,
-      stdio: 'pipe'
-    });
+  // Check which tools are available - use 'command -v' for better cross-platform support
+  let availableTools = [];
+  const checkCommands = ['dwg2dxf', 'dwgread', 'dwg2SVG', 'ODAFileConverter'];
 
-    if (fs.existsSync(dxfPath)) {
-      console.log('✅ DWG converted to DXF successfully');
-      return dxfPath;
-    }
-  } catch (e) {
-    console.log(`⚠️ dwg2dxf failed: ${e.message}`);
+  for (const cmd of checkCommands) {
+    try {
+      // Try both 'which' (Linux) and 'where' (Windows) approaches
+      try {
+        execSync(`which ${cmd} 2>/dev/null || where ${cmd} 2>nul`, { stdio: 'pipe' });
+        availableTools.push(cmd);
+      } catch (e) {
+        // Command not found, continue
+      }
+    } catch (e) {}
   }
 
-  // Try alternative: dwgread
-  try {
-    execSync(`dwgread "${dwgPath}" -O DXF -o "${dxfPath}"`, {
-      timeout: 60000,
-      stdio: 'pipe'
-    });
-
-    if (fs.existsSync(dxfPath)) {
-      console.log('✅ DWG converted to DXF using dwgread');
-      return dxfPath;
-    }
-  } catch (e) {
-    console.log(`⚠️ dwgread also failed: ${e.message}`);
+  if (availableTools.length === 0) {
+    console.log('⚠️ No DWG conversion tools available on this system');
+    console.log('   Note: DWG files require the APS Vision pipeline for analysis');
+    return null;
   }
 
+  console.log(`   Available tools: ${availableTools.join(', ')}`);
+
+  // Method 1: dwg2dxf (simplest)
+  if (availableTools.includes('dwg2dxf')) {
+    try {
+      const result = execSync(`dwg2dxf "${dwgPath}"`, {
+        timeout: 120000,
+        cwd: dirName,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      if (fs.existsSync(dxfPath)) {
+        const size = fs.statSync(dxfPath).size;
+        console.log(`✅ DWG converted to DXF: ${(size/1024).toFixed(0)}KB`);
+        return dxfPath;
+      }
+    } catch (e) {
+      console.log(`⚠️ dwg2dxf failed: ${e.message.substring(0, 100)}`);
+    }
+  }
+
+  // Method 2: dwgread with DXF output
+  if (availableTools.includes('dwgread')) {
+    try {
+      execSync(`dwgread -O DXF "${dwgPath}" -o "${dxfPath}"`, {
+        timeout: 120000,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      if (fs.existsSync(dxfPath)) {
+        const size = fs.statSync(dxfPath).size;
+        console.log(`✅ DWG converted using dwgread: ${(size/1024).toFixed(0)}KB`);
+        return dxfPath;
+      }
+    } catch (e) {
+      console.log(`⚠️ dwgread failed: ${e.message.substring(0, 100)}`);
+    }
+  }
+
+  // Method 3: ODA File Converter
+  if (availableTools.includes('ODAFileConverter')) {
+    try {
+      execSync(`ODAFileConverter "${dirName}" "${dirName}" ACAD2018 DXF 0 1 "${baseName}.dwg"`, {
+        timeout: 120000,
+        stdio: 'pipe'
+      });
+
+      if (fs.existsSync(dxfPath)) {
+        console.log('✅ DWG converted using ODA');
+        return dxfPath;
+      }
+    } catch (e) {
+      console.log(`⚠️ ODA failed: ${e.message.substring(0, 100)}`);
+    }
+  }
+
+  console.log('⚠️ DWG to DXF conversion unavailable - proceeding with vision-only analysis');
   return null;
 }
 
@@ -865,15 +919,26 @@ app.use(express.static('public'));
 
 // ===== API ROUTES =====
 app.get('/api/health', (req, res) => {
+  // Check available DWG tools (suppress errors silently)
+  let dwgTools = [];
+  const checkCommands = ['dwg2dxf', 'dwgread', 'dwg2SVG'];
+  for (const cmd of checkCommands) {
+    try {
+      execSync(`which ${cmd} 2>/dev/null`, { stdio: 'pipe' });
+      dwgTools.push(cmd);
+    } catch (e) {}
+  }
+
   res.json({
     status: 'ok',
-    version: '37.0.0',
+    version: '37.3.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured',
     modes: ['fire-safety', 'compliance'],
-    activeProjects: projects.size
+    activeProjects: projects.size,
+    dwgTools: dwgTools.length > 0 ? dwgTools : 'none (use APS Vision pipeline)'
   });
 });
 
@@ -1609,7 +1674,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.3');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
@@ -1617,8 +1682,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`☁️  APS: ${APS_CLIENT_ID ? '✅ configured' : '❌ not configured'}`);
   console.log(`🤖 Claude: ${ANTHROPIC_API_KEY ? '✅ ready' : '❌ not configured'}`);
   console.log('========================================');
-  console.log('🔥 Fire Safety Mode: DWG → Vision Analysis');
+  console.log('🔥 Fire Safety Mode: DWG → APS Vision Analysis');
   console.log('📋 Compliance Mode: Reference Docs → Requirements → Plan Check');
+  console.log('📐 DXF Support: Vector parsing with visual rendering');
   console.log('========================================\n');
 });
 
