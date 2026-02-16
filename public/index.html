@@ -1320,10 +1320,19 @@
 
       <!-- Compliance Results -->
       <section class="compliance-results" id="complianceResults">
+        <!-- Analysis Method Badge -->
+        <div class="method-badge-wrap" id="complianceMethodBadge" style="display:none">
+          <div class="method-badge vector" id="complianceMethodLabel">
+            <span>📐</span>
+            <span>וקטורים</span>
+          </div>
+        </div>
+
         <!-- Plan Preview -->
         <div class="image-section" id="compliancePlanPreview" style="display:none">
           <div class="image-header">
-            <h3>📐 התכנית</h3>
+            <h3>📐 התכנית המעובדת</h3>
+            <span class="source-badge vector" id="complianceImageSource">רינדור וקטורי</span>
           </div>
           <div class="image-wrap" onclick="toggleZoom(this)">
             <img id="compliancePlanImage" src="" alt="Plan">
@@ -1801,11 +1810,43 @@
       const resultsSection = document.getElementById('complianceResults');
       resultsSection.classList.add('active');
 
-      // Plan preview
+      // Analysis method badge
+      const methodBadge = document.getElementById('complianceMethodBadge');
+      const methodLabel = document.getElementById('complianceMethodLabel');
+      const imageSource = document.getElementById('complianceImageSource');
+
+      if (data.analysisMethod === 'vector-render') {
+        methodBadge.style.display = 'flex';
+        methodLabel.className = 'method-badge vector';
+        methodLabel.innerHTML = '<span>📐</span><span>ניתוח וקטורי + תמונה</span>';
+        imageSource.textContent = 'רינדור וקטורי';
+        imageSource.className = 'source-badge vector';
+      } else if (data.analysisMethod === 'vision-high-res') {
+        methodBadge.style.display = 'flex';
+        methodLabel.className = 'method-badge vision';
+        methodLabel.innerHTML = '<span>👁️</span><span>ניתוח חזותי HD</span>';
+        imageSource.textContent = 'צילום APS';
+        imageSource.className = 'source-badge derivative';
+      } else {
+        methodBadge.style.display = 'flex';
+        methodLabel.className = 'method-badge';
+        methodLabel.style.background = 'linear-gradient(135deg, #6b7280, #4b5563)';
+        methodLabel.innerHTML = '<span>📝</span><span>ניתוח טקסטואלי בלבד</span>';
+        imageSource.textContent = 'אין תמונה';
+        imageSource.className = 'source-badge thumbnail';
+      }
+
+      // Plan preview - use full API URL for cross-origin image loading
       const planPreview = document.getElementById('compliancePlanPreview');
-      if (data.screenshotUrl) {
+      if (data.screenshotId) {
         planPreview.style.display = 'block';
-        document.getElementById('compliancePlanImage').src = data.screenshotUrl;
+        // Use the preview endpoint with full Railway URL
+        document.getElementById('compliancePlanImage').src = `${API_BASE}/preview/${data.screenshotId}`;
+      } else if (data.screenshotUrl) {
+        // Fallback: construct full URL from relative path
+        planPreview.style.display = 'block';
+        const baseUrl = API_BASE.replace('/api', '');
+        document.getElementById('compliancePlanImage').src = baseUrl + data.screenshotUrl;
       } else {
         planPreview.style.display = 'none';
       }
