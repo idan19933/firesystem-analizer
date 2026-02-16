@@ -427,8 +427,22 @@ async function captureHighResScreenshot(token, urn, outputPath) {
       viewer.start();
 
       Autodesk.Viewing.Document.load('urn:${urn}', function(doc) {
+        // Try multiple search strategies
         var views = doc.getRoot().search({ type: 'geometry', role: '2d' });
         if (!views.length) views = doc.getRoot().search({ type: 'geometry', role: '3d' });
+        if (!views.length) views = doc.getRoot().search({ type: 'geometry' });
+        if (!views.length) {
+          // Try getting default view
+          var defaultView = doc.getRoot().getDefaultGeometry();
+          if (defaultView) views = [defaultView];
+        }
+        if (!views.length) {
+          // Last resort: get all viewables
+          var allViewables = doc.getRoot().search({ outputType: 'svf2' });
+          if (allViewables.length) views = allViewables;
+        }
+
+        console.log('Found views:', views.length);
 
         if (views.length) {
           viewer.loadDocumentNode(doc, views[0]).then(function() {
@@ -441,6 +455,16 @@ async function captureHighResScreenshot(token, urn, outputPath) {
                 document.title = 'READY';
               }, 5000);
             });
+            // Fallback timeout in case GEOMETRY_LOADED never fires
+            setTimeout(function() {
+              if (document.title !== 'READY') {
+                viewer.fitToView();
+                document.title = 'READY';
+              }
+            }, 30000);
+          }).catch(function(err) {
+            console.error('Load node error:', err);
+            document.title = 'ERROR';
           });
         } else {
           document.title = 'NO_VIEWS';
@@ -939,23 +963,31 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
     if ((ext === '.dwg' || ext === '.dwf') && puppeteer && sharp && APS_CLIENT_ID) {
       console.log('🎯 Using High-Res Vision Pipeline');
 
-      // APS Upload & Translate
-      const token = await getAPSToken();
-      const bucketKey = await ensureBucket(token);
-      const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
-      await translateToSVF2(token, urn);
+      try {
+        // APS Upload & Translate
+        const token = await getAPSToken();
+        const bucketKey = await ensureBucket(token);
+        const urn = await uploadToAPS(token, bucketKey, filePath, originalName);
+        await translateToSVF2(token, urn);
 
-      // Get fresh token for viewer
-      const viewerToken = await getAPSToken();
+        // Get fresh token for viewer
+        const viewerToken = await getAPSToken();
 
-      // Capture high-res screenshot
-      screenshotId = uuidv4();
-      const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
-      fullImage = await captureHighResScreenshot(viewerToken, urn, screenshotPath);
+        // Capture high-res screenshot
+        screenshotId = uuidv4();
+        const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+        fullImage = await captureHighResScreenshot(viewerToken, urn, screenshotPath);
 
-      screenshotUrl = `/screenshots/${screenshotId}.png`;
-      zones = await splitIntoZones(fullImage);
-      screenshotCache.set(screenshotId, { full: fullImage, zones });
+        screenshotUrl = `/screenshots/${screenshotId}.png`;
+        zones = await splitIntoZones(fullImage);
+        screenshotCache.set(screenshotId, { full: fullImage, zones });
+      } catch (visionError) {
+        console.log(`⚠️ Vision pipeline failed: ${visionError.message}`);
+        console.log('📝 Falling back to text-based analysis...');
+        // Set empty image data - will use text-based analysis
+        fullImage = null;
+        zones = [];
+      }
     }
     // ===== DXF: Parse and render =====
     else if (ext === '.dxf') {
@@ -1028,7 +1060,7 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
       } catch (e) {
         complianceResult = { results: [], overallCompliance: 50, planType: 'לא ידוע' };
       }
-    } else {
+    } else if (ext === '.dxf') {
       // Text-based analysis for DXF
       const analysis = await analyzeDXFComplete(filePath);
 
@@ -1060,6 +1092,48 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         }
       } catch (e) {
         complianceResult = { results: [], overallCompliance: 50, planType: 'לא ידוע' };
+      }
+    } else {
+      // DWG/DWF without vision - text-based requirements check only
+      console.log('📝 Using text-based compliance check (no image available)');
+
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 8000,
+          messages: [{
+            role: 'user',
+            content: `${compliancePrompt}\n\nהערה: לא ניתן היה לעבד את התכנית ויזואלית. אנא סמן את כל הדרישות הוויזואליות כ-needs_review והסבר שנדרשת בדיקה ידנית.\n\nשם הקובץ: ${originalName}`
+          }]
+        })
+      });
+
+      if (!resp.ok) throw new Error(`Claude API error: ${resp.status}`);
+      const data = await resp.json();
+      const content = data.content[0].text;
+
+      try {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          complianceResult = JSON.parse(jsonMatch[0]);
+        }
+      } catch (e) {
+        complianceResult = {
+          results: project.requirements.map(req => ({
+            requirementId: req.id,
+            status: 'needs_review',
+            finding_he: 'לא ניתן היה לעבד את התכנית - נדרשת בדיקה ידנית',
+            confidence: 0
+          })),
+          overallCompliance: 0,
+          planType: 'לא ידוע - נדרשת בדיקה ידנית'
+        };
       }
     }
 
