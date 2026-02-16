@@ -1343,6 +1343,12 @@
           <div id="checklistItems"></div>
         </div>
 
+        <!-- Detected Objects -->
+        <div class="vector-section" id="detectedObjectsSection" style="display:none">
+          <h3>📊 אובייקטים שזוהו מהתכנית</h3>
+          <div class="vector-grid" id="detectedObjectsGrid"></div>
+        </div>
+
         <!-- Potential Issues -->
         <div class="critical-box" id="complianceIssuesBox" style="display:none">
           <h3>⚠️ בעיות פוטנציאליות</h3>
@@ -1840,6 +1846,34 @@
             </div>
           `;
         }).join('');
+      }
+
+      // Detected objects
+      const objectsSection = document.getElementById('detectedObjectsSection');
+      const objects = data.detectedObjects;
+      if (objects) {
+        objectsSection.style.display = 'block';
+        const items = [
+          { k: 'sprinklers', l: 'ספרינקלרים', i: '💧', color: '#00ff00' },
+          { k: 'smokeDetectors', l: 'גלאי עשן', i: '🔔', color: '#ffff00' },
+          { k: 'fireExtinguishers', l: 'מטפים', i: '🧯', color: '#ff6600' },
+          { k: 'hydrants', l: 'הידרנטים', i: '🔴', color: '#ff0000' },
+          { k: 'fireDoors', l: 'דלתות אש', i: '🚪', color: '#ff00ff' },
+          { k: 'exits', l: 'יציאות', i: '🚪', color: '#00ffff' },
+          { k: 'stairs', l: 'מדרגות', i: '🪜', color: '#0066ff' },
+          { k: 'rooms', l: 'חדרים', i: '🏠', color: '#888' }
+        ];
+
+        document.getElementById('detectedObjectsGrid').innerHTML = items.map(item => {
+          const count = objects[item.k] || 0;
+          const cls = count > 0 ? 'highlight' : '';
+          return `<div class="vector-item ${cls}">
+            <div class="count" style="color: ${item.color}">${count}</div>
+            <div class="label">${item.i} ${item.l}</div>
+          </div>`;
+        }).join('');
+      } else {
+        objectsSection.style.display = 'none';
       }
 
       // Potential issues

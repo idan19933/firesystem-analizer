@@ -24,7 +24,7 @@ const { v4: uuidv4 } = require('uuid');
 const AdmZip = require('adm-zip');
 
 // DXF Analyzer
-const { analyzeDXFComplete } = require('./dxf-analyzer');
+const { analyzeDXFComplete, streamParseDXF, buildObjectTree, classifyFireSafety } = require('./dxf-analyzer');
 
 // Puppeteer and Sharp for high-res capture
 let puppeteer, sharp;
@@ -506,6 +506,196 @@ async function captureHighResScreenshot(token, urn, outputPath) {
   }
 }
 
+// ===== CONVERT DWG TO DXF =====
+async function convertDWGtoDXF(dwgPath) {
+  const dxfPath = dwgPath.replace(/\.dwg$/i, '.dxf');
+
+  console.log('🔄 Converting DWG to DXF using dwg2dxf...');
+
+  try {
+    // Try dwg2dxf from libredwg-tools
+    execSync(`dwg2dxf "${dwgPath}" -o "${dxfPath}"`, {
+      timeout: 60000,
+      stdio: 'pipe'
+    });
+
+    if (fs.existsSync(dxfPath)) {
+      console.log('✅ DWG converted to DXF successfully');
+      return dxfPath;
+    }
+  } catch (e) {
+    console.log(`⚠️ dwg2dxf failed: ${e.message}`);
+  }
+
+  // Try alternative: dwgread
+  try {
+    execSync(`dwgread "${dwgPath}" -O DXF -o "${dxfPath}"`, {
+      timeout: 60000,
+      stdio: 'pipe'
+    });
+
+    if (fs.existsSync(dxfPath)) {
+      console.log('✅ DWG converted to DXF using dwgread');
+      return dxfPath;
+    }
+  } catch (e) {
+    console.log(`⚠️ dwgread also failed: ${e.message}`);
+  }
+
+  return null;
+}
+
+// ===== RENDER VECTORS TO IMAGE =====
+async function renderVectorsToImage(parsed, classified, outputPath) {
+  if (!sharp) {
+    console.log('⚠️ Sharp not available for vector rendering');
+    return null;
+  }
+
+  console.log('🎨 Rendering vectors to image...');
+
+  // Calculate bounds
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  const updateBounds = (x, y) => {
+    if (x !== undefined && y !== undefined && isFinite(x) && isFinite(y)) {
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  };
+
+  // Gather all points
+  parsed.lines.forEach(l => { updateBounds(l.x, l.y); updateBounds(l.x2, l.y2); });
+  parsed.circles.forEach(c => {
+    updateBounds(c.x - c.radius, c.y - c.radius);
+    updateBounds(c.x + c.radius, c.y + c.radius);
+  });
+  parsed.arcs.forEach(a => { updateBounds(a.x, a.y); });
+  parsed.polylines.forEach(p => {
+    (p.vertices || []).forEach(v => updateBounds(v.x, v.y));
+  });
+  parsed.texts.forEach(t => updateBounds(t.x, t.y));
+  parsed.blockRefs.forEach(b => updateBounds(b.x, b.y));
+
+  if (!isFinite(minX) || !isFinite(maxX)) {
+    console.log('⚠️ No valid geometry bounds found');
+    return null;
+  }
+
+  // Image dimensions
+  const padding = 50;
+  const maxDim = 4096;
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const scale = Math.min((maxDim - 2 * padding) / width, (maxDim - 2 * padding) / height);
+  const imgWidth = Math.min(maxDim, Math.ceil(width * scale + 2 * padding));
+  const imgHeight = Math.min(maxDim, Math.ceil(height * scale + 2 * padding));
+
+  console.log(`   Bounds: (${minX.toFixed(0)}, ${minY.toFixed(0)}) to (${maxX.toFixed(0)}, ${maxY.toFixed(0)})`);
+  console.log(`   Image size: ${imgWidth}x${imgHeight}, scale: ${scale.toFixed(4)}`);
+
+  // Transform function
+  const tx = (x) => padding + (x - minX) * scale;
+  const ty = (y) => imgHeight - padding - (y - minY) * scale; // Flip Y
+
+  // Build SVG
+  let svgPaths = [];
+
+  // Draw lines (gray)
+  parsed.lines.slice(0, 50000).forEach(l => {
+    if (l.x !== undefined && l.y !== undefined && l.x2 !== undefined && l.y2 !== undefined) {
+      svgPaths.push(`<line x1="${tx(l.x)}" y1="${ty(l.y)}" x2="${tx(l.x2)}" y2="${ty(l.y2)}" stroke="#444" stroke-width="1"/>`);
+    }
+  });
+
+  // Draw polylines (gray)
+  parsed.polylines.slice(0, 10000).forEach(p => {
+    if (p.vertices && p.vertices.length >= 2) {
+      const points = p.vertices.map(v => `${tx(v.x)},${ty(v.y)}`).join(' ');
+      svgPaths.push(`<polyline points="${points}" fill="none" stroke="#555" stroke-width="1"/>`);
+    }
+  });
+
+  // Draw circles (light blue)
+  parsed.circles.slice(0, 5000).forEach(c => {
+    if (c.x !== undefined && c.y !== undefined && c.radius > 0) {
+      const r = Math.max(2, c.radius * scale);
+      svgPaths.push(`<circle cx="${tx(c.x)}" cy="${ty(c.y)}" r="${r}" fill="none" stroke="#0088cc" stroke-width="1"/>`);
+    }
+  });
+
+  // Draw arcs (light blue)
+  parsed.arcs.slice(0, 5000).forEach(a => {
+    if (a.x !== undefined && a.y !== undefined && a.radius > 0) {
+      const r = Math.max(2, a.radius * scale);
+      svgPaths.push(`<circle cx="${tx(a.x)}" cy="${ty(a.y)}" r="${r}" fill="none" stroke="#00aaff" stroke-width="1" stroke-dasharray="3,3"/>`);
+    }
+  });
+
+  // Draw classified objects with colors
+  const classColors = {
+    sprinklers: '#00ff00',      // Green
+    smokeDetectors: '#ffff00',  // Yellow
+    fireExtinguishers: '#ff6600', // Orange
+    hydrants: '#ff0000',        // Red
+    fireDoors: '#ff00ff',       // Magenta
+    exits: '#00ffff',           // Cyan
+    stairs: '#0066ff'           // Blue
+  };
+
+  Object.entries(classified).forEach(([category, items]) => {
+    const color = classColors[category];
+    if (!color) return;
+
+    items.slice(0, 500).forEach(item => {
+      if (item.x !== undefined && item.y !== undefined) {
+        const cx = tx(item.x);
+        const cy = ty(item.y);
+        // Draw a marker
+        svgPaths.push(`<circle cx="${cx}" cy="${cy}" r="8" fill="${color}" stroke="#fff" stroke-width="2"/>`);
+        svgPaths.push(`<circle cx="${cx}" cy="${cy}" r="15" fill="none" stroke="${color}" stroke-width="2"/>`);
+      }
+    });
+  });
+
+  // Draw some text labels
+  parsed.texts.slice(0, 500).forEach(t => {
+    if (t.x !== undefined && t.y !== undefined && t.text) {
+      const fontSize = Math.max(8, Math.min(14, (t.height || 2) * scale));
+      // Escape text for SVG
+      const escapedText = (t.text || '').substring(0, 30).replace(/[<>&"']/g, '');
+      svgPaths.push(`<text x="${tx(t.x)}" y="${ty(t.y)}" font-size="${fontSize}" fill="#333">${escapedText}</text>`);
+    }
+  });
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${imgWidth}" height="${imgHeight}" viewBox="0 0 ${imgWidth} ${imgHeight}">
+    <rect width="100%" height="100%" fill="white"/>
+    ${svgPaths.join('\n    ')}
+    <!-- Legend -->
+    <rect x="10" y="10" width="180" height="170" fill="rgba(255,255,255,0.9)" stroke="#ccc"/>
+    <text x="20" y="30" font-size="14" font-weight="bold">מקרא:</text>
+    <circle cx="30" cy="50" r="6" fill="#00ff00"/><text x="45" y="55" font-size="12">ספרינקלרים (${classified.sprinklers?.length || 0})</text>
+    <circle cx="30" cy="70" r="6" fill="#ffff00"/><text x="45" y="75" font-size="12">גלאי עשן (${classified.smokeDetectors?.length || 0})</text>
+    <circle cx="30" cy="90" r="6" fill="#ff6600"/><text x="45" y="95" font-size="12">מטפים (${classified.fireExtinguishers?.length || 0})</text>
+    <circle cx="30" cy="110" r="6" fill="#ff0000"/><text x="45" y="115" font-size="12">הידרנטים (${classified.hydrants?.length || 0})</text>
+    <circle cx="30" cy="130" r="6" fill="#ff00ff"/><text x="45" y="135" font-size="12">דלתות אש (${classified.fireDoors?.length || 0})</text>
+    <circle cx="30" cy="150" r="6" fill="#00ffff"/><text x="45" y="155" font-size="12">יציאות (${classified.exits?.length || 0})</text>
+    <circle cx="30" cy="170" r="6" fill="#0066ff"/><text x="45" y="175" font-size="12">מדרגות (${classified.stairs?.length || 0})</text>
+  </svg>`;
+
+  try {
+    const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+    fs.writeFileSync(outputPath, pngBuffer);
+    console.log(`✅ Vector render saved: ${(pngBuffer.length / 1024).toFixed(0)}KB`);
+    return pngBuffer;
+  } catch (e) {
+    console.log(`⚠️ SVG render failed: ${e.message}`);
+    return null;
+  }
+}
+
 // ===== SPLIT INTO 9 ZONES =====
 async function splitIntoZones(imageBuffer) {
   if (!sharp) {
@@ -959,6 +1149,10 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
     const ext = path.extname(originalName).toLowerCase();
     let fullImage, zones, screenshotUrl, screenshotId;
 
+    // Variable to hold classified objects for compliance check
+    let classifiedObjects = null;
+    let vectorAnalysis = null;
+
     // ===== DWG/DWF: High-Res Vision Pipeline =====
     if ((ext === '.dwg' || ext === '.dwf') && puppeteer && sharp && APS_CLIENT_ID) {
       console.log('🎯 Using High-Res Vision Pipeline');
@@ -983,18 +1177,65 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         screenshotCache.set(screenshotId, { full: fullImage, zones });
       } catch (visionError) {
         console.log(`⚠️ Vision pipeline failed: ${visionError.message}`);
-        console.log('📝 Falling back to text-based analysis...');
-        // Set empty image data - will use text-based analysis
-        fullImage = null;
-        zones = [];
+        console.log('🔄 Trying DWG to DXF conversion for vector analysis...');
+
+        // Try to convert DWG to DXF and analyze vectors
+        const dxfPath = await convertDWGtoDXF(filePath);
+        if (dxfPath && fs.existsSync(dxfPath)) {
+          try {
+            console.log('📐 Parsing converted DXF...');
+            const parsed = await streamParseDXF(dxfPath);
+            const tree = buildObjectTree(parsed);
+            classifiedObjects = classifyFireSafety(tree);
+            vectorAnalysis = await analyzeDXFComplete(dxfPath);
+
+            // Render vectors to image
+            screenshotId = uuidv4();
+            const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+            fullImage = await renderVectorsToImage(parsed, classifiedObjects, screenshotPath);
+
+            if (fullImage) {
+              screenshotUrl = `/screenshots/${screenshotId}.png`;
+              zones = await splitIntoZones(fullImage);
+              screenshotCache.set(screenshotId, { full: fullImage, zones });
+              console.log('✅ Vector rendering successful');
+            }
+
+            // Cleanup converted DXF
+            try { fs.unlinkSync(dxfPath); } catch (e) {}
+          } catch (parseError) {
+            console.log(`⚠️ DXF parse failed: ${parseError.message}`);
+          }
+        } else {
+          console.log('⚠️ DWG to DXF conversion failed');
+        }
       }
     }
     // ===== DXF: Parse and render =====
     else if (ext === '.dxf') {
-      console.log('📐 DXF: Direct analysis');
-      // For DXF, we'll analyze without image for now
-      fullImage = null;
-      zones = [];
+      console.log('📐 DXF: Direct analysis with vector rendering');
+
+      try {
+        const parsed = await streamParseDXF(filePath);
+        const tree = buildObjectTree(parsed);
+        classifiedObjects = classifyFireSafety(tree);
+        vectorAnalysis = await analyzeDXFComplete(filePath);
+
+        // Render vectors to image
+        screenshotId = uuidv4();
+        const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+        fullImage = await renderVectorsToImage(parsed, classifiedObjects, screenshotPath);
+
+        if (fullImage) {
+          screenshotUrl = `/screenshots/${screenshotId}.png`;
+          zones = await splitIntoZones(fullImage);
+          screenshotCache.set(screenshotId, { full: fullImage, zones });
+        }
+      } catch (parseError) {
+        console.log(`⚠️ DXF parse failed: ${parseError.message}`);
+        fullImage = null;
+        zones = [];
+      }
     }
     else {
       throw new Error('פורמט לא נתמך. השתמש ב-DWG, DXF או DWF.');
@@ -1003,9 +1244,35 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
     // Build compliance check prompt
     const requirementsJson = JSON.stringify(project.requirements.slice(0, 50), null, 2);
     const limitsJson = JSON.stringify(project.numericLimits, null, 2);
+
+    // Add classified objects info if available
+    let classifiedInfo = '';
+    if (classifiedObjects) {
+      classifiedInfo = `
+=== אובייקטים שזוהו מוקטורים ===
+ספרינקלרים: ${classifiedObjects.sprinklers?.length || 0}
+גלאי עשן: ${classifiedObjects.smokeDetectors?.length || 0}
+גלאי חום: ${classifiedObjects.heatDetectors?.length || 0}
+מטפי כיבוי: ${classifiedObjects.fireExtinguishers?.length || 0}
+הידרנטים: ${classifiedObjects.hydrants?.length || 0}
+דלתות אש: ${classifiedObjects.fireDoors?.length || 0}
+יציאות חירום: ${classifiedObjects.exits?.length || 0}
+מדרגות: ${classifiedObjects.stairs?.length || 0}
+קירות אש: ${classifiedObjects.fireWalls?.length || 0}
+מעליות: ${classifiedObjects.elevators?.length || 0}
+חדרים: ${classifiedObjects.rooms?.length || 0}
+`;
+    }
+
+    // Add vector analysis report if available
+    let vectorReport = '';
+    if (vectorAnalysis && vectorAnalysis.reportText) {
+      vectorReport = `\n${vectorAnalysis.reportText}`;
+    }
+
     const compliancePrompt = COMPLIANCE_CHECK_PROMPT
       .replace('{REQUIREMENTS}', requirementsJson)
-      .replace('{NUMERIC_LIMITS}', limitsJson);
+      .replace('{NUMERIC_LIMITS}', limitsJson) + classifiedInfo + vectorReport;
 
     console.log('🤖 Sending to Claude for compliance check...');
 
@@ -1137,6 +1404,21 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
       }
     }
 
+    // Build detected objects summary
+    const detectedObjects = classifiedObjects ? {
+      sprinklers: classifiedObjects.sprinklers?.length || 0,
+      smokeDetectors: classifiedObjects.smokeDetectors?.length || 0,
+      heatDetectors: classifiedObjects.heatDetectors?.length || 0,
+      fireExtinguishers: classifiedObjects.fireExtinguishers?.length || 0,
+      hydrants: classifiedObjects.hydrants?.length || 0,
+      fireDoors: classifiedObjects.fireDoors?.length || 0,
+      exits: classifiedObjects.exits?.length || 0,
+      stairs: classifiedObjects.stairs?.length || 0,
+      fireWalls: classifiedObjects.fireWalls?.length || 0,
+      elevators: classifiedObjects.elevators?.length || 0,
+      rooms: classifiedObjects.rooms?.length || 0
+    } : null;
+
     // Store result in project
     const planResult = {
       id: uuidv4(),
@@ -1148,13 +1430,17 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
       results: complianceResult.results || [],
       overallCompliance: complianceResult.overallCompliance || 0,
       detectedMeasurements: complianceResult.detectedMeasurements || {},
-      potentialIssues: complianceResult.potentialIssues || []
+      potentialIssues: complianceResult.potentialIssues || [],
+      detectedObjects
     };
 
     project.planResults.push(planResult);
 
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`✅ Compliance check complete in ${totalTime}s - Score: ${planResult.overallCompliance}%`);
+    if (detectedObjects) {
+      console.log(`📊 Detected: ${detectedObjects.sprinklers} sprinklers, ${detectedObjects.fireExtinguishers} extinguishers, ${detectedObjects.exits} exits`);
+    }
 
     // Cleanup temp files
     tempFiles.forEach(f => { try { fs.unlinkSync(f); } catch (e) {} });
@@ -1170,6 +1456,8 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
       overallCompliance: planResult.overallCompliance,
       detectedMeasurements: planResult.detectedMeasurements,
       potentialIssues: planResult.potentialIssues,
+      detectedObjects,
+      analysisMethod: fullImage ? 'vector-render' : 'text-only',
       processingTime: `${totalTime}s`
     });
 
