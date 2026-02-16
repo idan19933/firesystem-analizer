@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.4
+ * Fire Safety & Compliance Checker - Server v37.5
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Direct parsing with vector rendering
  *
- * v37.4: Fixed vector bounds calculation - use percentile-based bounds to exclude outliers
+ * v37.5: IQR-based outlier removal for vector bounds, skip problematic layers
  */
 
 const express = require('express');
@@ -608,7 +608,20 @@ async function renderVectorsToImage(parsed, classified, outputPath) {
 
   console.log('🎨 Rendering vectors to image...');
 
-  // Collect all coordinates for percentile-based bounds
+  // Layers to skip for bounds calculation (often contain outliers)
+  const skipLayers = ['DEFPOINTS', 'POINTS', 'LOGO', '0'];
+  const shouldSkipLayer = (layer) => {
+    if (!layer) return false;
+    const upper = layer.toUpperCase();
+    return skipLayers.includes(upper) ||
+           upper.startsWith('IDAN_') ||
+           upper.startsWith('TR_') ||
+           upper.startsWith('TITLE') ||
+           upper.includes('BORDER') ||
+           upper.includes('FRAME');
+  };
+
+  // Collect coordinates only from geometry entities (not TEXT, POINT, INSERT)
   const xs = [];
   const ys = [];
 
@@ -619,117 +632,146 @@ async function renderVectorsToImage(parsed, classified, outputPath) {
     }
   };
 
-  // Gather all points from entities
+  // Only use LINE, LWPOLYLINE, ARC, CIRCLE for bounds (skip TEXT, POINT, INSERT/blockRefs)
   parsed.lines.forEach(l => {
-    addPoint(l.x, l.y);
-    addPoint(l.x2, l.y2);
-  });
-  parsed.circles.forEach(c => {
-    if (c.x !== undefined && c.y !== undefined && c.radius > 0) {
-      addPoint(c.x - c.radius, c.y - c.radius);
-      addPoint(c.x + c.radius, c.y + c.radius);
-      addPoint(c.x, c.y);
+    if (!shouldSkipLayer(l.layer)) {
+      addPoint(l.x, l.y);
+      addPoint(l.x2, l.y2);
     }
   });
+
+  parsed.polylines.forEach(p => {
+    if (!shouldSkipLayer(p.layer)) {
+      (p.vertices || []).forEach(v => addPoint(v.x, v.y));
+    }
+  });
+
+  parsed.circles.forEach(c => {
+    if (!shouldSkipLayer(c.layer) && c.x !== undefined && c.y !== undefined && c.radius > 0 && c.radius < 10000) {
+      addPoint(c.x - c.radius, c.y - c.radius);
+      addPoint(c.x + c.radius, c.y + c.radius);
+    }
+  });
+
   parsed.arcs.forEach(a => {
-    if (a.x !== undefined && a.y !== undefined && a.radius > 0) {
+    if (!shouldSkipLayer(a.layer) && a.x !== undefined && a.y !== undefined && a.radius > 0 && a.radius < 10000) {
       addPoint(a.x - a.radius, a.y - a.radius);
       addPoint(a.x + a.radius, a.y + a.radius);
     }
   });
-  parsed.polylines.forEach(p => {
-    (p.vertices || []).forEach(v => addPoint(v.x, v.y));
-  });
-  parsed.texts.forEach(t => addPoint(t.x, t.y));
-  parsed.blockRefs.forEach(b => addPoint(b.x, b.y));
 
-  console.log(`   Total coordinate points: ${xs.length}`);
+  console.log(`   Geometry points for bounds: ${xs.length}`);
 
   if (xs.length < 4) {
-    console.log('⚠️ Not enough geometry points found');
+    console.log('⚠️ Not enough geometry points, trying all entities...');
+    // Fallback: include all entities
+    parsed.texts.forEach(t => addPoint(t.x, t.y));
+    parsed.blockRefs.forEach(b => addPoint(b.x, b.y));
+  }
+
+  if (xs.length < 4) {
+    console.log('⚠️ Not enough points for rendering');
     return null;
   }
 
-  // Sort for percentile calculation
+  // Sort for IQR calculation
   xs.sort((a, b) => a - b);
   ys.sort((a, b) => a - b);
 
-  // Use 2nd/98th percentile to exclude outliers
-  const loIdx = Math.floor(xs.length * 0.02);
-  const hiIdx = Math.min(xs.length - 1, Math.floor(xs.length * 0.98));
+  // Calculate IQR for outlier removal
+  const q1IdxX = Math.floor(xs.length * 0.25);
+  const q3IdxX = Math.floor(xs.length * 0.75);
+  const q1X = xs[q1IdxX];
+  const q3X = xs[q3IdxX];
+  const iqrX = q3X - q1X;
 
-  let minX = xs[loIdx];
-  let maxX = xs[hiIdx];
-  let minY = ys[loIdx];
-  let maxY = ys[hiIdx];
+  const q1IdxY = Math.floor(ys.length * 0.25);
+  const q3IdxY = Math.floor(ys.length * 0.75);
+  const q1Y = ys[q1IdxY];
+  const q3Y = ys[q3IdxY];
+  const iqrY = q3Y - q1Y;
+
+  // Use IQR * 1.5 for outlier bounds (standard box plot whiskers)
+  let minX = q1X - 1.5 * iqrX;
+  let maxX = q3X + 1.5 * iqrX;
+  let minY = q1Y - 1.5 * iqrY;
+  let maxY = q3Y + 1.5 * iqrY;
+
+  // Clamp to actual data range
+  minX = Math.max(minX, xs[0]);
+  maxX = Math.min(maxX, xs[xs.length - 1]);
+  minY = Math.max(minY, ys[0]);
+  maxY = Math.min(maxY, ys[ys.length - 1]);
 
   let boundsWidth = maxX - minX;
   let boundsHeight = maxY - minY;
 
-  console.log(`   Percentile bounds: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
-  console.log(`   Bounds size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
+  console.log(`   IQR outlier bounds: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
+  console.log(`   IQR bounds size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
 
-  // If bounds are too small, try to find densest cluster
-  if (boundsWidth < 1.0 || boundsHeight < 1.0) {
-    console.log('⚠️ Bounds too small, finding densest cluster...');
-
-    // Use IQR (25th to 75th percentile) as fallback
-    const q1Idx = Math.floor(xs.length * 0.25);
-    const q3Idx = Math.floor(xs.length * 0.75);
-
-    minX = xs[q1Idx];
-    maxX = xs[q3Idx];
-    minY = ys[q1Idx];
-    maxY = ys[q3Idx];
-
+  // If IQR bounds are too small or invalid, use percentile fallback
+  if (boundsWidth < 10 || boundsHeight < 10 || !isFinite(boundsWidth) || !isFinite(boundsHeight)) {
+    console.log('⚠️ IQR bounds too small, using 5th-95th percentile...');
+    const p5 = Math.floor(xs.length * 0.05);
+    const p95 = Math.floor(xs.length * 0.95);
+    minX = xs[p5];
+    maxX = xs[p95];
+    minY = ys[p5];
+    maxY = ys[p95];
     boundsWidth = maxX - minX;
     boundsHeight = maxY - minY;
-
-    console.log(`   IQR bounds: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
-    console.log(`   IQR size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
-
-    // If still too small, use full range with some margin
-    if (boundsWidth < 1.0 || boundsHeight < 1.0) {
-      minX = xs[0];
-      maxX = xs[xs.length - 1];
-      minY = ys[0];
-      maxY = ys[ys.length - 1];
-      boundsWidth = maxX - minX;
-      boundsHeight = maxY - minY;
-      console.log(`   Using full range: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
-    }
+    console.log(`   Percentile bounds: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
   }
 
-  // Add 5% padding to bounds
+  // Still too small? Use full range
+  if (boundsWidth < 10 || boundsHeight < 10) {
+    console.log('⚠️ Still too small, using full range...');
+    minX = xs[0];
+    maxX = xs[xs.length - 1];
+    minY = ys[0];
+    maxY = ys[ys.length - 1];
+    boundsWidth = maxX - minX;
+    boundsHeight = maxY - minY;
+  }
+
+  // Add 5% padding on all sides
   const padX = boundsWidth * 0.05;
   const padY = boundsHeight * 0.05;
   minX -= padX;
   maxX += padX;
   minY -= padY;
   maxY += padY;
-
   boundsWidth = maxX - minX;
   boundsHeight = maxY - minY;
 
-  console.log(`   Final bounds with padding: (${minX.toFixed(1)}, ${minY.toFixed(1)}) to (${maxX.toFixed(1)}, ${maxY.toFixed(1)})`);
-  console.log(`   Final size: ${boundsWidth.toFixed(1)} x ${boundsHeight.toFixed(1)}`);
+  console.log('   Render bounds:', { xmin: minX.toFixed(1), xmax: maxX.toFixed(1), ymin: minY.toFixed(1), ymax: maxY.toFixed(1), width: boundsWidth.toFixed(1), height: boundsHeight.toFixed(1) });
 
-  // Image dimensions
+  // Image dimensions - minimum 2000x2000, max 4096x4096
   const imgPadding = 50;
+  const minDim = 2000;
   const maxDim = 4096;
-  const scale = Math.min((maxDim - 2 * imgPadding) / boundsWidth, (maxDim - 2 * imgPadding) / boundsHeight);
-  const imgWidth = Math.min(maxDim, Math.ceil(boundsWidth * scale + 2 * imgPadding));
-  const imgHeight = Math.min(maxDim, Math.ceil(boundsHeight * scale + 2 * imgPadding));
+
+  // Calculate scale to fit in max dimension
+  const scaleX = (maxDim - 2 * imgPadding) / boundsWidth;
+  const scaleY = (maxDim - 2 * imgPadding) / boundsHeight;
+  const scale = Math.min(scaleX, scaleY);
+
+  // Calculate image size (enforce minimum)
+  let imgWidth = Math.ceil(boundsWidth * scale + 2 * imgPadding);
+  let imgHeight = Math.ceil(boundsHeight * scale + 2 * imgPadding);
+  imgWidth = Math.max(minDim, Math.min(maxDim, imgWidth));
+  imgHeight = Math.max(minDim, Math.min(maxDim, imgHeight));
 
   console.log(`   Image: ${imgWidth}x${imgHeight}, scale: ${scale.toFixed(4)}`);
 
-  // Transform function - clamp to image bounds
+  // Transform function - DXF is Y-up, SVG is Y-down (flip Y)
   const tx = (x) => {
     const px = imgPadding + (x - minX) * scale;
     return Math.max(0, Math.min(imgWidth, px));
   };
   const ty = (y) => {
-    const py = imgHeight - imgPadding - (y - minY) * scale; // Flip Y
+    // Flip Y axis: DXF Y-up -> SVG Y-down
+    const py = imgHeight - imgPadding - (y - minY) * scale;
     return Math.max(0, Math.min(imgHeight, py));
   };
 
@@ -1010,7 +1052,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.4.0',
+    version: '37.5.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
@@ -1753,7 +1795,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.4');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.5');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);

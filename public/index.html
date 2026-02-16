@@ -1838,17 +1838,37 @@
 
       // Plan preview - use full API URL for cross-origin image loading
       const planPreview = document.getElementById('compliancePlanPreview');
+      const compImg = document.getElementById('compliancePlanImage');
+      const compImgWrap = compImg.parentElement;
+
+      // Add error handling for compliance plan image
+      compImg.onerror = () => {
+        console.error('Compliance plan image failed:', compImg.src);
+        compImgWrap.innerHTML = `
+          <div style="padding:40px;text-align:center;color:#ef4444;background:var(--bg-elevated);border-radius:12px;">
+            <div style="font-size:2rem;margin-bottom:12px;">⚠️</div>
+            <div>שגיאה בטעינת תמונת התכנית</div>
+            <div style="font-size:0.8rem;color:var(--text-dim);margin-top:8px;">נסה להעלות קובץ DXF במקום DWG</div>
+          </div>`;
+      };
+      compImg.onload = () => console.log('Compliance plan image loaded:', compImg.src);
+
       if (data.screenshotId) {
         planPreview.style.display = 'block';
         // Use the preview endpoint with full Railway URL
-        document.getElementById('compliancePlanImage').src = `${API_BASE}/preview/${data.screenshotId}`;
+        const imgUrl = `${API_BASE}/preview/${data.screenshotId}`;
+        console.log('Loading compliance plan image:', imgUrl);
+        compImg.src = imgUrl;
       } else if (data.screenshotUrl) {
         // Fallback: construct full URL from relative path
         planPreview.style.display = 'block';
         const baseUrl = API_BASE.replace('/api', '');
-        document.getElementById('compliancePlanImage').src = baseUrl + data.screenshotUrl;
+        const imgUrl = baseUrl + data.screenshotUrl;
+        console.log('Loading compliance plan image (fallback):', imgUrl);
+        compImg.src = imgUrl;
       } else {
         planPreview.style.display = 'none';
+        console.log('No screenshot available for compliance plan');
       }
 
       // Compliance score
@@ -2309,16 +2329,35 @@
 
       // Image - prefer screenshotUrl (high-res from vision pipeline), fallback to imageUrl
       const imageSection = document.getElementById('imageSection');
-      const imgUrl = data.screenshotUrl || data.imageUrl;
+      let imgUrl = data.screenshotUrl || data.imageUrl;
+
+      // Fix relative URLs - prepend Railway base URL
+      if (imgUrl && !imgUrl.startsWith('http') && !imgUrl.startsWith('data:')) {
+        const baseUrl = API_BASE.replace('/api', '');
+        imgUrl = baseUrl + imgUrl;
+        console.log('Fixed relative URL:', imgUrl);
+      }
+
       console.log('Image URL:', imgUrl);
 
       if (imgUrl) {
         console.log('Showing image section with URL:', imgUrl);
         imageSection.style.display = 'block';
         const fullImg = document.getElementById('fullImage');
+        const imageWrap = fullImg.parentElement;
+
+        // Add error handling for broken images
+        fullImg.onerror = (e) => {
+          console.error('Image failed to load:', imgUrl);
+          imageWrap.innerHTML = `
+            <div style="padding:40px;text-align:center;color:#ef4444;background:var(--bg-elevated);border-radius:12px;">
+              <div style="font-size:2rem;margin-bottom:12px;">⚠️</div>
+              <div>שגיאה בטעינת התמונה</div>
+              <div style="font-size:0.8rem;color:var(--text-dim);margin-top:8px;word-break:break-all;">${imgUrl}</div>
+            </div>`;
+        };
+        fullImg.onload = () => console.log('Image loaded successfully:', imgUrl);
         fullImg.src = imgUrl;
-        fullImg.onerror = () => console.error('Failed to load image:', imgUrl);
-        fullImg.onload = () => console.log('Image loaded successfully');
         document.getElementById('downloadBtn').href = imgUrl;
 
         const badges = document.getElementById('sourceBadges');
