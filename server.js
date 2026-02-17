@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.8
+ * Fire Safety & Compliance Checker - Server v37.9
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Python ezdxf + matplotlib for high-quality rendering
  *
- * v37.8: Dockerfile for Railway with Python/ezdxf, improved Python detection
+ * v37.9: Fixed Hebrew text encoding crash in matplotlib, added text sanitizer
  */
 
 const express = require('express');
@@ -1325,7 +1325,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.8.0',
+    version: '37.9.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     python: pythonStatus,
@@ -2147,7 +2147,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.8');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.9');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);

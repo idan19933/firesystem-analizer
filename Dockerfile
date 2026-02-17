@@ -1,5 +1,6 @@
-# Fire Safety Checker - Railway Dockerfile
+# Fire Safety Checker - Railway Dockerfile v2
 # Node.js + Python for DXF rendering with ezdxf
+# Fixed Hebrew text encoding issues
 
 FROM node:20-slim
 
@@ -8,9 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-dev \
-    # Fonts for Hebrew text rendering
+    # Fonts for Hebrew text rendering (comprehensive)
     fonts-noto \
+    fonts-noto-core \
+    fonts-noto-extra \
+    fonts-dejavu \
     fonts-dejavu-core \
+    fonts-dejavu-extra \
+    fonts-freefont-ttf \
+    fontconfig \
     # Chromium dependencies for Puppeteer
     ca-certificates \
     fonts-liberation \
@@ -56,6 +63,17 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     matplotlib \
     Pillow \
     numpy
+
+# Update font cache for matplotlib
+RUN fc-cache -fv
+
+# Configure matplotlib to use a font that supports Hebrew
+RUN mkdir -p /root/.config/matplotlib && \
+    echo "font.family: DejaVu Sans" > /root/.config/matplotlib/matplotlibrc && \
+    echo "font.sans-serif: DejaVu Sans, Noto Sans, FreeSans, sans-serif" >> /root/.config/matplotlib/matplotlibrc
+
+# Clear matplotlib font cache to pick up new fonts
+RUN python3 -c "import matplotlib; matplotlib.font_manager._rebuild()" || true
 
 # Set Puppeteer to use system Chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true

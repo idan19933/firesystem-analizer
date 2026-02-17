@@ -3,6 +3,8 @@
 DXF Fire Safety Analyzer - Python Pipeline
 Renders DXF to high-res image using ezdxf + matplotlib, then outputs for Claude Vision analysis.
 
+v2: Fixed Hebrew text encoding (ANSI_1255 / cp1255) crash in matplotlib
+
 Usage:
     python analyze_dxf.py input.dxf --output /tmp/output_dir
 """
@@ -11,6 +13,7 @@ import os
 import sys
 import json
 import argparse
+import tempfile
 from datetime import datetime
 
 # Try to import dependencies
@@ -62,6 +65,87 @@ ACI_COLORS = {
 }
 
 
+def safe_text(s):
+    """
+    Remove characters that matplotlib/FreeType can't render.
+    Handles Hebrew cp1255 encoding issues and surrogate characters.
+    """
+    if not s:
+        return ''
+
+    cleaned = ''
+    for ch in s:
+        try:
+            code = ord(ch)
+            # Skip surrogate characters (U+D800 to U+DFFF)
+            if 0xD800 <= code <= 0xDFFF:
+                continue
+            # Skip supplementary plane chars that FreeType may choke on
+            if code > 0xFFFF:
+                continue
+            # Skip control characters except newline/tab
+            if code < 32 and code not in (9, 10, 13):
+                continue
+            # Test if it's valid UTF-8
+            ch.encode('utf-8')
+            cleaned += ch
+        except (UnicodeEncodeError, UnicodeDecodeError, ValueError):
+            continue
+
+    return cleaned
+
+
+def read_dxf_safe(filepath):
+    """Read DXF with proper Hebrew encoding handling."""
+    # First try normal read (ezdxf handles codepage)
+    try:
+        doc = ezdxf.readfile(filepath)
+        print(f"   Loaded DXF with default encoding")
+        return doc
+    except Exception as e:
+        print(f"   Default read failed: {e}")
+
+    # Try forcing cp1255 (Hebrew Windows codepage)
+    try:
+        doc = ezdxf.readfile(filepath, encoding='cp1255')
+        print(f"   Loaded DXF with cp1255 encoding")
+        return doc
+    except Exception as e:
+        print(f"   cp1255 read failed: {e}")
+
+    # Try ISO-8859-8 (Hebrew ISO)
+    try:
+        doc = ezdxf.readfile(filepath, encoding='iso-8859-8')
+        print(f"   Loaded DXF with iso-8859-8 encoding")
+        return doc
+    except Exception as e:
+        print(f"   iso-8859-8 read failed: {e}")
+
+    # Last resort: read as bytes, transcode, save temp, re-read
+    try:
+        with open(filepath, 'rb') as f:
+            raw = f.read()
+
+        # Try to decode as cp1255 and re-encode as utf-8
+        text = raw.decode('cp1255', errors='replace')
+        # Replace the codepage declaration if present
+        text = text.replace('ANSI_1255', 'UTF-8')
+        text = text.replace('ansi_1255', 'UTF-8')
+
+        tmp = tempfile.NamedTemporaryFile(suffix='.dxf', delete=False, mode='w', encoding='utf-8')
+        tmp.write(text)
+        tmp.close()
+
+        doc = ezdxf.readfile(tmp.name)
+        os.unlink(tmp.name)
+        print(f"   Loaded DXF via transcoding workaround")
+        return doc
+    except Exception as e:
+        print(f"   Transcoding workaround failed: {e}")
+
+    raise RuntimeError(f"Cannot read DXF with any encoding method")
+
+
 def get_entity_color(entity):
     """Get color from entity, handling ByLayer and ByBlock."""
     try:
@@ -79,7 +163,7 @@ def render_dxf_with_addon(dxf_path, output_path, dpi=200):
     """Render DXF using ezdxf's matplotlib drawing addon."""
     print(f"   Using ezdxf drawing addon...")
 
-    doc = ezdxf.readfile(dxf_path)
+    doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
 
     entity_count = len(list(msp))
@@ -104,11 +188,201 @@ def render_dxf_with_addon(dxf_path, output_path, dpi=200):
     return output_path
 
 
-def render_dxf_manual(dxf_path, output_path, dpi=200):
-    """Manual rendering - parse entities and draw with matplotlib."""
-    print(f"   Using manual renderer...")
+def render_dxf_manual_with_text(dxf_path, output_path, dpi=200):
+    """Manual rendering with sanitized text - parse entities and draw with matplotlib."""
+    print(f"   Using manual renderer WITH text...")
 
-    doc = ezdxf.readfile(dxf_path)
+    doc = read_dxf_safe(dxf_path)
+    msp = doc.modelspace()
+
+    fig, ax = plt.subplots(1, 1, figsize=(40, 40))
+    ax.set_facecolor('white')
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    entity_count = 0
+    text_count = 0
+    text_errors = 0
+
+    # Draw LINE entities
+    for entity in msp.query('LINE'):
+        try:
+            color = get_entity_color(entity)
+            start = entity.dxf.start
+            end = entity.dxf.end
+            ax.plot([start.x, end.x], [start.y, end.y], color=color, linewidth=0.3)
+            entity_count += 1
+        except Exception:
+            pass
+
+    # Draw CIRCLE entities
+    for entity in msp.query('CIRCLE'):
+        try:
+            color = get_entity_color(entity)
+            c = entity.dxf.center
+            r = entity.dxf.radius
+            circle = plt.Circle((c.x, c.y), r, fill=False, color=color, linewidth=0.3)
+            ax.add_patch(circle)
+            entity_count += 1
+        except Exception:
+            pass
+
+    # Draw ARC entities
+    for entity in msp.query('ARC'):
+        try:
+            color = get_entity_color(entity)
+            c = entity.dxf.center
+            r = entity.dxf.radius
+            arc = patches.Arc((c.x, c.y), 2*r, 2*r, angle=0,
+                              theta1=entity.dxf.start_angle,
+                              theta2=entity.dxf.end_angle,
+                              color=color, linewidth=0.3)
+            ax.add_patch(arc)
+            entity_count += 1
+        except Exception:
+            pass
+
+    # Draw LWPOLYLINE entities
+    for entity in msp.query('LWPOLYLINE'):
+        try:
+            color = get_entity_color(entity)
+            points = list(entity.get_points(format='xy'))
+            if len(points) >= 2:
+                xs, ys = zip(*points)
+                if entity.closed:
+                    xs = list(xs) + [xs[0]]
+                    ys = list(ys) + [ys[0]]
+                ax.plot(xs, ys, color=color, linewidth=0.3)
+            entity_count += 1
+        except Exception:
+            pass
+
+    # Draw POLYLINE entities
+    for entity in msp.query('POLYLINE'):
+        try:
+            color = get_entity_color(entity)
+            points = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+            if len(points) >= 2:
+                xs, ys = zip(*points)
+                ax.plot(xs, ys, color=color, linewidth=0.3)
+            entity_count += 1
+        except Exception:
+            pass
+
+    # Draw TEXT entities with sanitization
+    for entity in msp.query('TEXT'):
+        try:
+            color = get_entity_color(entity)
+            pos = entity.dxf.insert
+            raw_text = entity.dxf.text
+            text = safe_text(raw_text)
+            if text:
+                height = entity.dxf.height
+                ax.text(pos.x, pos.y, text, fontsize=max(1, height * 0.5),
+                        color=color, ha='left', va='bottom')
+                text_count += 1
+            entity_count += 1
+        except Exception as e:
+            text_errors += 1
+
+    # Draw MTEXT entities with sanitization
+    for entity in msp.query('MTEXT'):
+        try:
+            color = get_entity_color(entity)
+            pos = entity.dxf.insert
+            raw_text = entity.text
+            text = safe_text(raw_text)
+            if text:
+                ax.text(pos.x, pos.y, text, fontsize=2, color=color,
+                        ha='left', va='top')
+                text_count += 1
+            entity_count += 1
+        except Exception as e:
+            text_errors += 1
+
+    # Draw POINT entities
+    for entity in msp.query('POINT'):
+        try:
+            color = get_entity_color(entity)
+            p = entity.dxf.location
+            ax.plot(p.x, p.y, '.', color=color, markersize=0.5)
+            entity_count += 1
+        except Exception:
+            pass
+
+    # Expand and draw INSERT (block references)
+    insert_count = 0
+    for insert in msp.query('INSERT'):
+        try:
+            for entity in insert.virtual_entities():
+                try:
+                    color = get_entity_color(entity)
+                    etype = entity.dxftype()
+
+                    if etype == 'LINE':
+                        s = entity.dxf.start
+                        e = entity.dxf.end
+                        ax.plot([s.x, e.x], [s.y, e.y], color=color, linewidth=0.3)
+                    elif etype == 'LWPOLYLINE':
+                        pts = list(entity.get_points(format='xy'))
+                        if len(pts) >= 2:
+                            xs, ys = zip(*pts)
+                            if entity.closed:
+                                xs = list(xs) + [xs[0]]
+                                ys = list(ys) + [ys[0]]
+                            ax.plot(xs, ys, color=color, linewidth=0.3)
+                    elif etype == 'POLYLINE':
+                        pts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                        if len(pts) >= 2:
+                            xs, ys = zip(*pts)
+                            ax.plot(xs, ys, color=color, linewidth=0.3)
+                    elif etype == 'ARC':
+                        c = entity.dxf.center
+                        r = entity.dxf.radius
+                        arc = patches.Arc((c.x, c.y), 2*r, 2*r, angle=0,
+                                          theta1=entity.dxf.start_angle,
+                                          theta2=entity.dxf.end_angle,
+                                          color=color, linewidth=0.3)
+                        ax.add_patch(arc)
+                    elif etype == 'CIRCLE':
+                        c = entity.dxf.center
+                        r = entity.dxf.radius
+                        ax.add_patch(plt.Circle((c.x, c.y), r, fill=False,
+                                                color=color, linewidth=0.3))
+                    elif etype == 'TEXT':
+                        pos = entity.dxf.insert
+                        text = safe_text(entity.dxf.text)
+                        if text:
+                            ax.text(pos.x, pos.y, text, fontsize=1, color=color)
+                    elif etype == 'MTEXT':
+                        pos = entity.dxf.insert
+                        text = safe_text(entity.text)
+                        if text:
+                            ax.text(pos.x, pos.y, text, fontsize=1, color=color)
+
+                    insert_count += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    print(f"   Drew {entity_count} entities + {insert_count} from block references")
+    print(f"   Text rendered: {text_count}, text errors: {text_errors}")
+
+    ax.autoscale()
+    fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
+                facecolor='white', pad_inches=0.5, format='png')
+    plt.close(fig)
+
+    print(f"   Rendered to {output_path}")
+    return output_path
+
+
+def render_dxf_no_text(dxf_path, output_path, dpi=200):
+    """Manual rendering WITHOUT text - skips TEXT/MTEXT to avoid encoding crashes."""
+    print(f"   Using manual renderer WITHOUT text (geometry only)...")
+
+    doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
 
     fig, ax = plt.subplots(1, 1, figsize=(40, 40))
@@ -183,31 +457,6 @@ def render_dxf_manual(dxf_path, output_path, dpi=200):
         except Exception:
             pass
 
-    # Draw TEXT entities
-    for entity in msp.query('TEXT'):
-        try:
-            color = get_entity_color(entity)
-            pos = entity.dxf.insert
-            text = entity.dxf.text
-            height = entity.dxf.height
-            ax.text(pos.x, pos.y, text, fontsize=max(1, height * 0.5),
-                    color=color, ha='left', va='bottom')
-            entity_count += 1
-        except Exception:
-            pass
-
-    # Draw MTEXT entities
-    for entity in msp.query('MTEXT'):
-        try:
-            color = get_entity_color(entity)
-            pos = entity.dxf.insert
-            text = entity.text
-            ax.text(pos.x, pos.y, text, fontsize=2, color=color,
-                    ha='left', va='top')
-            entity_count += 1
-        except Exception:
-            pass
-
     # Draw POINT entities
     for entity in msp.query('POINT'):
         try:
@@ -218,7 +467,7 @@ def render_dxf_manual(dxf_path, output_path, dpi=200):
         except Exception:
             pass
 
-    # Expand and draw INSERT (block references)
+    # Expand and draw INSERT (block references) - GEOMETRY ONLY
     insert_count = 0
     for insert in msp.query('INSERT'):
         try:
@@ -231,11 +480,22 @@ def render_dxf_manual(dxf_path, output_path, dpi=200):
                         s = entity.dxf.start
                         e = entity.dxf.end
                         ax.plot([s.x, e.x], [s.y, e.y], color=color, linewidth=0.3)
+                        insert_count += 1
                     elif etype == 'LWPOLYLINE':
                         pts = list(entity.get_points(format='xy'))
                         if len(pts) >= 2:
                             xs, ys = zip(*pts)
+                            if entity.closed:
+                                xs = list(xs) + [xs[0]]
+                                ys = list(ys) + [ys[0]]
                             ax.plot(xs, ys, color=color, linewidth=0.3)
+                        insert_count += 1
+                    elif etype == 'POLYLINE':
+                        pts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                        if len(pts) >= 2:
+                            xs, ys = zip(*pts)
+                            ax.plot(xs, ys, color=color, linewidth=0.3)
+                        insert_count += 1
                     elif etype == 'ARC':
                         c = entity.dxf.center
                         r = entity.dxf.radius
@@ -244,22 +504,20 @@ def render_dxf_manual(dxf_path, output_path, dpi=200):
                                           theta2=entity.dxf.end_angle,
                                           color=color, linewidth=0.3)
                         ax.add_patch(arc)
+                        insert_count += 1
                     elif etype == 'CIRCLE':
                         c = entity.dxf.center
                         r = entity.dxf.radius
                         ax.add_patch(plt.Circle((c.x, c.y), r, fill=False,
                                                 color=color, linewidth=0.3))
-                    elif etype == 'TEXT':
-                        pos = entity.dxf.insert
-                        ax.text(pos.x, pos.y, entity.dxf.text, fontsize=1, color=color)
-
-                    insert_count += 1
+                        insert_count += 1
+                    # Skip TEXT and MTEXT inside blocks
                 except Exception:
                     pass
         except Exception:
             pass
 
-    print(f"   Drew {entity_count} entities + {insert_count} from block references")
+    print(f"   Drew {entity_count} entities + {insert_count} from block references (no text)")
 
     ax.autoscale()
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
@@ -271,14 +529,28 @@ def render_dxf_manual(dxf_path, output_path, dpi=200):
 
 
 def render_dxf(dxf_path, output_path, dpi=200):
-    """Render DXF to PNG, trying addon first then falling back to manual."""
+    """
+    Render DXF to PNG with multiple fallback strategies:
+    1. Try ezdxf addon (best quality)
+    2. Try manual renderer with sanitized text
+    3. Try manual renderer without text (most robust)
+    """
+    # Strategy 1: ezdxf drawing addon
     if EZDXF_DRAWING:
         try:
             return render_dxf_with_addon(dxf_path, output_path, dpi)
         except Exception as e:
-            print(f"   Addon failed: {e}, falling back to manual renderer")
+            print(f"   Addon failed: {e}")
 
-    return render_dxf_manual(dxf_path, output_path, dpi)
+    # Strategy 2: Manual renderer with sanitized text
+    try:
+        return render_dxf_manual_with_text(dxf_path, output_path, dpi)
+    except Exception as e:
+        print(f"   Manual renderer with text failed: {e}")
+
+    # Strategy 3: Manual renderer without text (most robust)
+    print(f"   Falling back to geometry-only renderer...")
+    return render_dxf_no_text(dxf_path, output_path, dpi)
 
 
 def split_into_zones(image_path, output_dir, grid=(3, 3)):
@@ -316,7 +588,7 @@ def split_into_zones(image_path, output_dir, grid=(3, 3)):
 
 def extract_metadata(dxf_path):
     """Extract structured metadata from DXF file."""
-    doc = ezdxf.readfile(dxf_path)
+    doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
 
     # Count entities by type
@@ -328,11 +600,12 @@ def extract_metadata(dxf_path):
     # Layers
     layers = [layer.dxf.name for layer in doc.layers]
 
-    # All text content
+    # All text content (sanitized)
     texts = []
     for e in msp.query('TEXT MTEXT'):
         try:
-            t = e.dxf.text if e.dxftype() == 'TEXT' else e.text
+            raw = e.dxf.text if e.dxftype() == 'TEXT' else e.text
+            t = safe_text(raw)
             if t:
                 texts.append(t)
         except:
@@ -402,7 +675,7 @@ def main():
 
     if not args.json:
         print('=' * 50)
-        print('🎨 DXF RENDERER')
+        print('🎨 DXF RENDERER v2 (Hebrew-safe)')
         print(f'📁 {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
         print('=' * 50)
 
