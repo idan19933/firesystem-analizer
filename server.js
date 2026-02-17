@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.5
+ * Fire Safety & Compliance Checker - Server v37.6
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Direct parsing with vector rendering
  *
- * v37.5: IQR-based outlier removal for vector bounds, skip problematic layers
+ * v37.6: Improved APS viewer - recursive viewable search, better debugging, fallback chain
  */
 
 const express = require('express');
@@ -379,6 +379,46 @@ async function waitForTranslation(token, urn) {
   throw new Error('Translation timeout');
 }
 
+// ===== FETCH MANIFEST TO FIND VIEWABLES =====
+async function getManifestViewables(token, urn) {
+  try {
+    const resp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const manifest = await resp.json();
+
+    // Extract all viewable GUIDs from the manifest
+    const viewables = [];
+
+    function findViewables(node, path = '') {
+      if (node.guid && (node.role === '2d' || node.role === '3d' || node.type === 'geometry')) {
+        viewables.push({
+          guid: node.guid,
+          role: node.role || node.type,
+          name: node.name || path,
+          path: path
+        });
+      }
+      if (node.children) {
+        node.children.forEach((child, i) => findViewables(child, `${path}/${child.name || i}`));
+      }
+      if (node.derivatives) {
+        node.derivatives.forEach((d, i) => findViewables(d, `${path}/derivative${i}`));
+      }
+    }
+
+    findViewables(manifest);
+    console.log(`   Found ${viewables.length} viewables in manifest:`);
+    viewables.forEach(v => console.log(`      - ${v.name} (${v.role}) [${v.guid.substring(0, 20)}...]`));
+
+    return viewables;
+  } catch (e) {
+    console.log(`   Could not fetch manifest viewables: ${e.message}`);
+    return [];
+  }
+}
+
 // ===== HIGH-RES SCREENSHOT WITH PUPPETEER =====
 async function captureHighResScreenshot(token, urn, outputPath) {
   if (!puppeteer) {
@@ -386,6 +426,9 @@ async function captureHighResScreenshot(token, urn, outputPath) {
   }
 
   console.log('📸 Capturing high-res screenshot with Puppeteer...');
+
+  // First, get viewables from manifest for debugging
+  const manifestViewables = await getManifestViewables(token, urn);
 
   const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 
@@ -405,6 +448,9 @@ async function captureHighResScreenshot(token, urn, outputPath) {
     const page = await browser.newPage();
     await page.setViewport({ width: 4096, height: 4096 });
 
+    // Enable console logging from the page
+    page.on('console', msg => console.log('   [Viewer]', msg.text()));
+
     const html = `<!DOCTYPE html>
 <html><head>
   <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css">
@@ -417,6 +463,7 @@ async function captureHighResScreenshot(token, urn, outputPath) {
   <div id="viewer"></div>
   <script>
     window.onerror = function(e) { console.error('Error:', e); };
+    window.viewerDebug = {};
 
     Autodesk.Viewing.Initializer({
       env: 'AutodeskProduction2',
@@ -429,50 +476,142 @@ async function captureHighResScreenshot(token, urn, outputPath) {
       viewer.start();
 
       Autodesk.Viewing.Document.load('urn:${urn}', function(doc) {
-        // Try multiple search strategies
-        var views = doc.getRoot().search({ type: 'geometry', role: '2d' });
-        if (!views.length) views = doc.getRoot().search({ type: 'geometry', role: '3d' });
-        if (!views.length) views = doc.getRoot().search({ type: 'geometry' });
-        if (!views.length) {
-          // Try getting default view
-          var defaultView = doc.getRoot().getDefaultGeometry();
-          if (defaultView) views = [defaultView];
-        }
-        if (!views.length) {
-          // Last resort: get all viewables
-          var allViewables = doc.getRoot().search({ outputType: 'svf2' });
-          if (allViewables.length) views = allViewables;
+        var root = doc.getRoot();
+        window.viewerDebug.root = root;
+
+        // Log the document structure
+        console.log('Document loaded. Root:', root.data.type);
+
+        // Function to recursively find all viewables
+        function findAllViewables(node, results, depth) {
+          results = results || [];
+          depth = depth || 0;
+          var indent = '  '.repeat(depth);
+
+          if (node.data) {
+            console.log(indent + 'Node: ' + (node.data.name || node.data.type) + ' role=' + node.data.role + ' type=' + node.data.type);
+          }
+
+          // Check if this node is viewable
+          if (node.data && node.data.role === '2d') {
+            results.push({ node: node, type: '2d', name: node.data.name });
+          } else if (node.data && node.data.role === '3d') {
+            results.push({ node: node, type: '3d', name: node.data.name });
+          } else if (node.data && node.data.type === 'geometry') {
+            results.push({ node: node, type: 'geometry', name: node.data.name });
+          }
+
+          // Recurse into children
+          var children = node.children();
+          if (children) {
+            for (var i = 0; i < children.length; i++) {
+              findAllViewables(children[i], results, depth + 1);
+            }
+          }
+
+          return results;
         }
 
-        console.log('Found views:', views.length);
+        var allViewables = findAllViewables(root);
+        console.log('Total viewables found: ' + allViewables.length);
+        window.viewerDebug.viewables = allViewables;
 
-        if (views.length) {
-          viewer.loadDocumentNode(doc, views[0]).then(function() {
+        // Also try standard search methods
+        var views2d = root.search({ type: 'geometry', role: '2d' });
+        var views3d = root.search({ type: 'geometry', role: '3d' });
+        var viewsAny = root.search({ type: 'geometry' });
+        var defaultView = root.getDefaultGeometry();
+
+        console.log('Search results: 2d=' + views2d.length + ' 3d=' + views3d.length + ' any=' + viewsAny.length + ' default=' + !!defaultView);
+
+        // Build priority list of views to try
+        var viewsToTry = [];
+
+        // Prefer 2D views (floor plans)
+        if (views2d.length) {
+          views2d.forEach(function(v) { viewsToTry.push(v); });
+        }
+
+        // Then try viewables found by traversal
+        allViewables.forEach(function(v) {
+          if (viewsToTry.indexOf(v.node) === -1) {
+            viewsToTry.push(v.node);
+          }
+        });
+
+        // Then 3D views
+        if (views3d.length) {
+          views3d.forEach(function(v) {
+            if (viewsToTry.indexOf(v) === -1) viewsToTry.push(v);
+          });
+        }
+
+        // Then any geometry
+        if (viewsAny.length) {
+          viewsAny.forEach(function(v) {
+            if (viewsToTry.indexOf(v) === -1) viewsToTry.push(v);
+          });
+        }
+
+        // Default geometry
+        if (defaultView && viewsToTry.indexOf(defaultView) === -1) {
+          viewsToTry.push(defaultView);
+        }
+
+        console.log('Views to try: ' + viewsToTry.length);
+
+        if (viewsToTry.length === 0) {
+          console.error('NO VIEWABLES FOUND!');
+          document.title = 'NO_VIEWS';
+          return;
+        }
+
+        // Try to load the first available view
+        function tryLoadView(index) {
+          if (index >= viewsToTry.length) {
+            console.error('All view load attempts failed');
+            document.title = 'NO_VIEWS';
+            return;
+          }
+
+          var viewNode = viewsToTry[index];
+          console.log('Trying to load view ' + index + ': ' + (viewNode.data ? viewNode.data.name : 'unknown'));
+
+          viewer.loadDocumentNode(doc, viewNode).then(function() {
+            console.log('View loaded successfully!');
+
             viewer.addEventListener(Autodesk.Viewing.GEOMETRY_LOADED_EVENT, function() {
+              console.log('Geometry loaded event fired');
               viewer.fitToView();
               viewer.setBackgroundColor(255, 255, 255, 255, 255, 255);
               viewer.navigation.setZoomTowardsPivot(false);
 
               setTimeout(function() {
+                console.log('Setting READY');
                 document.title = 'READY';
               }, 5000);
             });
-            // Fallback timeout in case GEOMETRY_LOADED never fires
+
+            // Fallback timeout
             setTimeout(function() {
-              if (document.title !== 'READY') {
+              if (document.title !== 'READY' && document.title !== 'NO_VIEWS') {
+                console.log('Timeout fallback - forcing READY');
                 viewer.fitToView();
                 document.title = 'READY';
               }
             }, 30000);
+
           }).catch(function(err) {
-            console.error('Load node error:', err);
-            document.title = 'ERROR';
+            console.error('Failed to load view ' + index + ':', err);
+            // Try next view
+            tryLoadView(index + 1);
           });
-        } else {
-          document.title = 'NO_VIEWS';
         }
+
+        tryLoadView(0);
+
       }, function(err) {
-        console.error('Load error:', err);
+        console.error('Document load error:', err);
         document.title = 'ERROR';
       });
     });
@@ -489,6 +628,14 @@ async function captureHighResScreenshot(token, urn, outputPath) {
 
     const title = await page.title();
     if (title === 'ERROR' || title === 'NO_VIEWS') {
+      // Get debug info from page
+      const debugInfo = await page.evaluate(() => {
+        return {
+          viewables: window.viewerDebug?.viewables?.length || 0,
+          error: window.viewerDebug?.error
+        };
+      });
+      console.log('   Debug info:', debugInfo);
       throw new Error(`Viewer failed: ${title}`);
     }
 
@@ -1052,7 +1199,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.5.0',
+    version: '37.6.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
@@ -1795,7 +1942,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.5');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.6');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
