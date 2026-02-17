@@ -53,6 +53,19 @@ except ImportError:
 import numpy as np
 
 
+def ensure_max_size(image_path, max_dim=7000):
+    """Resize image if any dimension exceeds max_dim (Claude limit is 8000px)."""
+    img = Image.open(image_path)
+    w, h = img.size
+    if w > max_dim or h > max_dim:
+        ratio = min(max_dim / w, max_dim / h)
+        new_size = (int(w * ratio), int(h * ratio))
+        img = img.resize(new_size, Image.LANCZOS)
+        img.save(image_path)
+        log(f"   Resized: {w}x{h} -> {new_size[0]}x{new_size[1]} (max {max_dim}px)")
+    return image_path
+
+
 # ACI color map (AutoCAD Color Index)
 ACI_COLORS = {
     0: '#000000',   # ByBlock
@@ -689,6 +702,9 @@ def main():
     log('Rendering DXF to high-res PNG...')
     rendered_path = os.path.join(args.output, 'rendered_plan.png')
     render_dxf(args.input, rendered_path, dpi=args.dpi)
+
+    # Step 1.5: Ensure image doesn't exceed Claude's 8000px limit
+    ensure_max_size(rendered_path, max_dim=7000)
 
     # Step 2: Split into zones
     log('Splitting into analysis zones...')

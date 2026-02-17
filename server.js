@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.10
+ * Fire Safety & Compliance Checker - Server v37.12
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Python ezdxf + matplotlib for high-quality rendering
  *
- * v37.10: Fixed stdout/stderr separation - Python logs to stderr, only JSON to stdout
+ * v37.12: Resize images to max 7000px before sending to Claude (8000px limit)
  */
 
 const express = require('express');
@@ -1168,6 +1168,47 @@ function getMediaType(bufferOrPath) {
   return 'image/png';
 }
 
+// ===== ENSURE IMAGE DOESN'T EXCEED CLAUDE'S 8000px LIMIT =====
+async function ensureMaxSize(imagePath, maxDim = 7000) {
+  if (!sharp) {
+    console.log('⚠️ Sharp not available, skipping resize check');
+    return imagePath;
+  }
+  try {
+    const meta = await sharp(imagePath).metadata();
+    if (meta.width > maxDim || meta.height > maxDim) {
+      const tmpPath = imagePath + '.tmp';
+      await sharp(imagePath)
+        .resize(maxDim, maxDim, { fit: 'inside' })
+        .toFile(tmpPath);
+      fs.renameSync(tmpPath, imagePath);
+      console.log(`📏 Resized: ${meta.width}x${meta.height} -> ≤${maxDim}px`);
+    }
+    return imagePath;
+  } catch (err) {
+    console.log(`⚠️ Resize check failed: ${err.message}`);
+    return imagePath;
+  }
+}
+
+async function ensureMaxSizeBuffer(buffer, maxDim = 7000) {
+  if (!sharp) return buffer;
+  try {
+    const meta = await sharp(buffer).metadata();
+    if (meta.width > maxDim || meta.height > maxDim) {
+      const resized = await sharp(buffer)
+        .resize(maxDim, maxDim, { fit: 'inside' })
+        .toBuffer();
+      console.log(`📏 Resized buffer: ${meta.width}x${meta.height} -> ≤${maxDim}px`);
+      return resized;
+    }
+    return buffer;
+  } catch (err) {
+    console.log(`⚠️ Buffer resize failed: ${err.message}`);
+    return buffer;
+  }
+}
+
 // ===== SPLIT INTO 9 ZONES =====
 async function splitIntoZones(imageBuffer) {
   if (!sharp) {
@@ -1210,16 +1251,18 @@ async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
 
   console.log('🤖 Sending to Claude Vision...');
 
-  // Build image array: full image + 9 zones (filter out empty/broken images)
+  // Build image array: full image + 9 zones (filter out empty/broken, resize if needed)
   const allBuffers = [fullImage, ...zones];
   const images = [];
 
   for (let i = 0; i < allBuffers.length; i++) {
-    const buf = allBuffers[i];
+    let buf = allBuffers[i];
     if (!buf || buf.length < 100) {
       console.log(`⚠️ Skipping empty/broken image at index ${i}`);
       continue;
     }
+    // Resize if exceeds Claude's 8000px limit
+    buf = await ensureMaxSizeBuffer(buf, 7000);
     const mediaType = getMediaType(buf);
     images.push({
       type: "image",
@@ -1838,16 +1881,18 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
     let complianceResult;
 
     if (fullImage && zones.length > 0) {
-      // Vision-based analysis with proper media type detection
+      // Vision-based analysis with proper media type detection and resize
       const allBuffers = [fullImage, ...zones];
       const images = [];
       for (let i = 0; i < allBuffers.length; i++) {
-        const buf = allBuffers[i];
+        let buf = allBuffers[i];
         // Skip empty or corrupted images
         if (!buf || buf.length < 100) {
           console.log(`⚠️ Compliance: Skipping empty/broken image at index ${i}`);
           continue;
         }
+        // Resize if exceeds Claude's 8000px limit
+        buf = await ensureMaxSizeBuffer(buf, 7000);
         const mediaType = getMediaType(buf);
         images.push({
           type: "image",
