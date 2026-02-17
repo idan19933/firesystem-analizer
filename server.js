@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.6
+ * Fire Safety & Compliance Checker - Server v37.7
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -10,9 +10,9 @@
  * HIGH-RES VISION: Puppeteer captures 4096x4096 screenshot from APS Viewer
  * Splits into 9 zones + full image -> Claude Vision analysis
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
- * DXF: Direct parsing with vector rendering
+ * DXF: Python ezdxf + matplotlib for high-quality rendering
  *
- * v37.6: Improved APS viewer - recursive viewable search, better debugging, fallback chain
+ * v37.7: Python ezdxf renderer for better DXF quality, fallback to JS renderer
  */
 
 const express = require('express');
@@ -746,6 +746,87 @@ async function convertDWGtoDXF(dwgPath) {
   return null;
 }
 
+// ===== PYTHON EZDXF RENDERER =====
+async function renderDXFWithPython(dxfPath, outputDir) {
+  console.log('🐍 Attempting Python ezdxf rendering...');
+
+  const pythonScript = path.join(__dirname, 'analyze_dxf.py');
+
+  // Check if Python script exists
+  if (!fs.existsSync(pythonScript)) {
+    console.log('⚠️ Python script not found:', pythonScript);
+    return null;
+  }
+
+  // Check if Python is available
+  let pythonCmd = 'python3';
+  try {
+    execSync('python3 --version', { stdio: 'pipe' });
+  } catch (e) {
+    try {
+      execSync('python --version', { stdio: 'pipe' });
+      pythonCmd = 'python';
+    } catch (e2) {
+      console.log('⚠️ Python not available on this system');
+      return null;
+    }
+  }
+
+  // Create output directory
+  const outputPath = outputDir || path.join(tmpDir, `dxf-render-${Date.now()}`);
+  fs.mkdirSync(outputPath, { recursive: true });
+
+  try {
+    // Run Python script with JSON output
+    const cmd = `${pythonCmd} "${pythonScript}" "${dxfPath}" --output "${outputPath}" --dpi 200 --json`;
+    console.log(`   Running: ${pythonCmd} analyze_dxf.py ...`);
+
+    const result = execSync(cmd, {
+      timeout: 300000,  // 5 minute timeout for large files
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: 50 * 1024 * 1024  // 50MB buffer
+    });
+
+    // Parse JSON output
+    const jsonResult = JSON.parse(result.trim());
+
+    if (!jsonResult.success) {
+      console.log('⚠️ Python render reported failure');
+      return null;
+    }
+
+    console.log(`✅ Python render complete in ${jsonResult.processing_time}s`);
+    console.log(`   Entities: ${jsonResult.metadata?.total_entities || 'unknown'}`);
+    console.log(`   Overview: ${jsonResult.overview}`);
+    console.log(`   Zones: ${jsonResult.zones?.length || 0}`);
+
+    // Read the rendered image
+    const renderedPath = jsonResult.rendered_image || path.join(outputPath, 'rendered_plan.png');
+    if (fs.existsSync(renderedPath)) {
+      const imageBuffer = fs.readFileSync(renderedPath);
+      console.log(`   Image size: ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB`);
+
+      return {
+        buffer: imageBuffer,
+        overview: jsonResult.overview,
+        zones: jsonResult.zones,
+        allImages: jsonResult.all_images,
+        metadata: jsonResult.metadata,
+        outputDir: outputPath
+      };
+    } else {
+      console.log('⚠️ Rendered image not found at:', renderedPath);
+      return null;
+    }
+
+  } catch (e) {
+    console.log(`⚠️ Python render failed: ${e.message}`);
+    if (e.stderr) console.log(`   stderr: ${e.stderr.substring(0, 500)}`);
+    return null;
+  }
+}
+
 // ===== RENDER VECTORS TO IMAGE =====
 async function renderVectorsToImage(parsed, classified, outputPath) {
   if (!sharp) {
@@ -1199,7 +1280,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.6.0',
+    version: '37.7.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
@@ -1546,23 +1627,65 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
     }
     // ===== DXF: Parse and render =====
     else if (ext === '.dxf') {
-      console.log('📐 DXF: Direct analysis with vector rendering');
+      console.log('📐 DXF: Direct analysis with Python ezdxf rendering');
 
       try {
-        const parsed = await streamParseDXF(filePath);
-        const tree = buildObjectTree(parsed);
-        classifiedObjects = classifyFireSafety(tree);
-        vectorAnalysis = await analyzeDXFComplete(filePath);
+        // First, try Python ezdxf renderer (better quality)
+        const pythonResult = await renderDXFWithPython(filePath, path.join(tmpDir, `dxf-${Date.now()}`));
 
-        // Render vectors to image
-        screenshotId = uuidv4();
-        const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
-        fullImage = await renderVectorsToImage(parsed, classifiedObjects, screenshotPath);
-
-        if (fullImage) {
+        if (pythonResult && pythonResult.buffer) {
+          console.log('✅ Using Python-rendered image');
+          screenshotId = uuidv4();
+          const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+          fs.writeFileSync(screenshotPath, pythonResult.buffer);
+          fullImage = pythonResult.buffer;
           screenshotUrl = `/screenshots/${screenshotId}.png`;
-          zones = await splitIntoZones(fullImage);
+
+          // Load zone images if Python generated them
+          if (pythonResult.zones && pythonResult.zones.length > 0) {
+            zones = pythonResult.zones.map(zonePath => {
+              if (fs.existsSync(zonePath)) {
+                return fs.readFileSync(zonePath);
+              }
+              return null;
+            }).filter(z => z !== null);
+          }
+
+          // If zones not generated by Python, split the main image
+          if (!zones || zones.length === 0) {
+            zones = await splitIntoZones(fullImage);
+          }
+
           screenshotCache.set(screenshotId, { full: fullImage, zones });
+
+          // Also parse for object classification
+          const parsed = await streamParseDXF(filePath);
+          const tree = buildObjectTree(parsed);
+          classifiedObjects = classifyFireSafety(tree);
+          vectorAnalysis = pythonResult.metadata ? { metadata: pythonResult.metadata } : await analyzeDXFComplete(filePath);
+
+          // Clean up Python output dir
+          if (pythonResult.outputDir) {
+            try { fs.rmSync(pythonResult.outputDir, { recursive: true, force: true }); } catch (e) {}
+          }
+        } else {
+          // Fallback to JavaScript renderer
+          console.log('🔄 Falling back to JavaScript vector renderer...');
+          const parsed = await streamParseDXF(filePath);
+          const tree = buildObjectTree(parsed);
+          classifiedObjects = classifyFireSafety(tree);
+          vectorAnalysis = await analyzeDXFComplete(filePath);
+
+          // Render vectors to image with JS
+          screenshotId = uuidv4();
+          const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+          fullImage = await renderVectorsToImage(parsed, classifiedObjects, screenshotPath);
+
+          if (fullImage) {
+            screenshotUrl = `/screenshots/${screenshotId}.png`;
+            zones = await splitIntoZones(fullImage);
+            screenshotCache.set(screenshotId, { full: fullImage, zones });
+          }
         }
       } catch (parseError) {
         console.log(`⚠️ DXF parse failed: ${parseError.message}`);
@@ -1869,19 +1992,54 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       };
     }
 
-    // ===== DXF: Direct parsing =====
+    // ===== DXF: Direct parsing with Python rendering =====
     else if (ext === '.dxf') {
-      console.log('📐 Using DXF parsing pipeline');
+      console.log('📐 Using DXF parsing pipeline with Python rendering');
 
-      const result = await analyzeDXFWithClaude(filePath, customPrompt);
-      report = result.report;
+      // Try Python renderer for visual analysis
+      const pythonResult = await renderDXFWithPython(filePath, path.join(tmpDir, `dxf-fire-${Date.now()}`));
 
-      analysisData = {
-        method: 'DXF Vector Parsing',
-        entities: result.analysis.parsed.totalEntities,
-        layers: Object.keys(result.analysis.tree.layers).length,
-        texts: result.analysis.parsed.texts.length
-      };
+      if (pythonResult && pythonResult.buffer) {
+        console.log('✅ Using Python-rendered image for Vision analysis');
+        const screenshotId = uuidv4();
+        const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+        fs.writeFileSync(screenshotPath, pythonResult.buffer);
+        const fullImage = pythonResult.buffer;
+        screenshotUrl = `/screenshots/${screenshotId}.png`;
+
+        // Split into zones
+        const zones = await splitIntoZones(fullImage);
+        screenshotCache.set(screenshotId, { full: fullImage, zones });
+
+        // Analyze with Claude Vision
+        report = await analyzeWithClaudeVision(fullImage, zones, customPrompt);
+
+        analysisData = {
+          method: 'DXF Python Render + Vision',
+          screenshotUrl,
+          zones: 9,
+          imagesAnalyzed: 10,
+          entities: pythonResult.metadata?.total_entities || 'unknown',
+          layers: pythonResult.metadata?.layer_count || 'unknown'
+        };
+
+        // Clean up Python output dir
+        if (pythonResult.outputDir) {
+          try { fs.rmSync(pythonResult.outputDir, { recursive: true, force: true }); } catch (e) {}
+        }
+      } else {
+        // Fallback to text-based analysis
+        console.log('🔄 Falling back to text-based DXF analysis...');
+        const result = await analyzeDXFWithClaude(filePath, customPrompt);
+        report = result.report;
+
+        analysisData = {
+          method: 'DXF Vector Parsing (text)',
+          entities: result.analysis.parsed.totalEntities,
+          layers: Object.keys(result.analysis.tree.layers).length,
+          texts: result.analysis.parsed.texts.length
+        };
+      }
     }
 
     // ===== Fallback for DWG without Vision =====
@@ -1942,7 +2100,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.6');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.7');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
@@ -1952,7 +2110,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('========================================');
   console.log('🔥 Fire Safety Mode: DWG → APS Vision Analysis');
   console.log('📋 Compliance Mode: Reference Docs → Requirements → Plan Check');
-  console.log('📐 DXF Support: Vector parsing with visual rendering');
+  console.log('🐍 DXF Support: Python ezdxf + matplotlib (high quality)');
   console.log('========================================\n');
 });
 

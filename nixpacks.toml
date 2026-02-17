@@ -1,11 +1,9 @@
 # Nixpacks configuration for Railway
-# Comprehensive Chromium/Puppeteer dependencies
-
-[phases.install]
-cmds = ["npm install"]
+# Comprehensive Chromium/Puppeteer + Python/ezdxf dependencies
 
 [phases.setup]
 aptPkgs = [
+  # Chromium/Puppeteer dependencies
   "ca-certificates",
   "fonts-liberation",
   "libappindicator1",
@@ -47,7 +45,20 @@ aptPkgs = [
   "xdg-utils",
   "xvfb",
   "chromium",
-  "libredwg-tools"
+  "libredwg-tools",
+  # Python for DXF rendering
+  "python3",
+  "python3-pip",
+  "python3-dev",
+  # Hebrew fonts for matplotlib text rendering
+  "fonts-noto",
+  "fonts-dejavu"
+]
+
+[phases.install]
+cmds = [
+  "npm install",
+  "pip3 install --user ezdxf matplotlib Pillow numpy"
 ]
 
 [variables]
