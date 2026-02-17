@@ -3,11 +3,10 @@
 DXF Fire Safety Analyzer - Python Pipeline
 Renders DXF to high-res image using ezdxf + matplotlib, then outputs for Claude Vision analysis.
 
-v5: PROVEN RENDERER - Fixed block expansion, color visibility, bounds calculation
-    - Blocks expand with entity.virtual_entities()
-    - Color 7/0 forced to black (not white-on-white)
-    - ax.autoscale_view() for proper bounds
-    - Debug logging for block expansion
+v6: SMART BOUNDS - Percentile-based bounds exclude outlier points
+    - Outliers (title block xrefs, north arrows) don't destroy view
+    - Uses 2nd/98th percentile + IQR fallback for concentrated content
+    - NEVER uses autoscale_view (single outlier makes drawing invisible)
 
 Usage:
     python analyze_dxf.py input.dxf --output /tmp/output_dir --json
@@ -19,6 +18,8 @@ import json
 import argparse
 import tempfile
 from datetime import datetime
+
+import numpy as np
 
 
 def log(msg):
@@ -126,14 +127,102 @@ def get_color(entity, default='#000000'):
         return default
 
 
+def calculate_smart_bounds(all_x, all_y, margin=0.1):
+    """Calculate bounds using percentiles to exclude outlier points."""
+    if len(all_x) == 0 or len(all_y) == 0:
+        return 0, 100, 0, 100
+
+    ax = np.array(all_x)
+    ay = np.array(all_y)
+
+    # Use 2nd and 98th percentile to exclude extreme outliers
+    xmin = np.percentile(ax, 2)
+    xmax = np.percentile(ax, 98)
+    ymin = np.percentile(ay, 2)
+    ymax = np.percentile(ay, 98)
+
+    # Add margin
+    xspan = xmax - xmin
+    yspan = ymax - ymin
+
+    # If span is suspiciously small compared to full range, use IQR method
+    full_xspan = ax.max() - ax.min()
+    full_yspan = ay.max() - ay.min()
+
+    if full_xspan > 0 and (xspan < full_xspan * 0.01):
+        # Content is extremely concentrated — use tight IQR bounds
+        q1x, q3x = np.percentile(ax, 10), np.percentile(ax, 90)
+        iqrx = q3x - q1x
+        xmin = q1x - 2 * iqrx
+        xmax = q3x + 2 * iqrx
+
+    if full_yspan > 0 and (yspan < full_yspan * 0.01):
+        q1y, q3y = np.percentile(ay, 10), np.percentile(ay, 90)
+        iqry = q3y - q1y
+        ymin = q1y - 2 * iqry
+        ymax = q3y + 2 * iqry
+
+    # Add margin
+    xpad = max((xmax - xmin) * margin, 1)
+    ypad = max((ymax - ymin) * margin, 1)
+
+    return xmin - xpad, xmax + xpad, ymin - ypad, ymax + ypad
+
+
+def collect_all_points(msp):
+    """Collect coordinates from all entities including expanded blocks."""
+    all_x, all_y = [], []
+
+    def collect(e):
+        try:
+            etype = e.dxftype()
+            if etype == 'LINE':
+                all_x.extend([e.dxf.start.x, e.dxf.end.x])
+                all_y.extend([e.dxf.start.y, e.dxf.end.y])
+            elif etype == 'LWPOLYLINE':
+                for pt in e.get_points(format='xy'):
+                    all_x.append(pt[0])
+                    all_y.append(pt[1])
+            elif etype == 'POLYLINE':
+                try:
+                    for v in e.vertices:
+                        all_x.append(v.dxf.location.x)
+                        all_y.append(v.dxf.location.y)
+                except:
+                    pass
+            elif etype in ('CIRCLE', 'ARC'):
+                all_x.append(e.dxf.center.x)
+                all_y.append(e.dxf.center.y)
+            elif etype == 'POINT':
+                all_x.append(e.dxf.location.x)
+                all_y.append(e.dxf.location.y)
+            elif etype == 'ELLIPSE':
+                all_x.append(e.dxf.center.x)
+                all_y.append(e.dxf.center.y)
+        except:
+            pass
+
+    for e in msp:
+        if e.dxftype() == 'INSERT':
+            try:
+                for ve in e.virtual_entities():
+                    collect(ve)
+            except:
+                pass
+        else:
+            collect(e)
+
+    return all_x, all_y
+
+
 def render_dxf(dxf_path, output_path, dpi=150):
     """
-    Render DXF to PNG - PROVEN approach with proper block expansion.
-    - Skips all text (Hebrew encoding issues)
-    - Forces color 7/0 to black (visible on white)
-    - Uses autoscale_view for proper bounds
+    Render DXF to PNG with SMART BOUNDS.
+    - Collects all coordinates including expanded blocks
+    - Uses percentile-based bounds to exclude outliers
+    - NEVER uses autoscale (outliers would make drawing invisible)
     """
-    log(f"   Using PROVEN renderer v5...")
+    log(f"   Using SMART BOUNDS renderer v6...")
 
     doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
@@ -148,11 +237,52 @@ def render_dxf(dxf_path, output_path, dpi=150):
     log(f"   Modelspace: {len(msp_list)} entities")
     log(f"   Types: {dict(sorted(type_counts.items(), key=lambda x: -x[1])[:8])}")
 
-    fig, ax = plt.subplots(1, 1, figsize=(40, 30))
+    # Step 1: Collect all points to calculate smart bounds
+    log("   Collecting geometry points...")
+    all_x, all_y = collect_all_points(msp)
+    log(f"   Total points collected: {len(all_x)}")
+
+    if len(all_x) == 0:
+        log("   ERROR: No geometry points found!")
+        # Fall back to document extents
+        try:
+            extmin = doc.header.get('$EXTMIN', (0, 0, 0))
+            extmax = doc.header.get('$EXTMAX', (100, 100, 0))
+            xmin, xmax = float(extmin[0]), float(extmax[0])
+            ymin, ymax = float(extmin[1]), float(extmax[1])
+            log(f"   Using document extents: X[{xmin:.1f}, {xmax:.1f}] Y[{ymin:.1f}, {ymax:.1f}]")
+        except:
+            xmin, xmax, ymin, ymax = 0, 100, 0, 100
+    else:
+        # Log full range vs percentile range
+        full_xmin, full_xmax = min(all_x), max(all_x)
+        full_ymin, full_ymax = min(all_y), max(all_y)
+        log(f"   Full range: X[{full_xmin:.1f}, {full_xmax:.1f}] Y[{full_ymin:.1f}, {full_ymax:.1f}]")
+        log(f"   Full span: {full_xmax - full_xmin:.1f} x {full_ymax - full_ymin:.1f}")
+
+        xmin, xmax, ymin, ymax = calculate_smart_bounds(all_x, all_y)
+
+    log(f"   Smart bounds: X[{xmin:.1f}, {xmax:.1f}] Y[{ymin:.1f}, {ymax:.1f}]")
+    log(f"   Smart span: {xmax - xmin:.1f} x {ymax - ymin:.1f}")
+
+    # Step 2: Create figure with correct aspect ratio
+    span_x = xmax - xmin
+    span_y = ymax - ymin
+    aspect = span_x / span_y if span_y > 0 else 1
+    fig_h = 40
+    fig_w = fig_h * aspect
+    fig_w = min(max(fig_w, 20), 80)  # clamp between 20 and 80
+
+    log(f"   Figure size: {fig_w:.1f} x {fig_h:.1f}")
+
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
     ax.set_facecolor('white')
     ax.set_aspect('equal')
     ax.axis('off')
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
 
+    # Step 3: Draw all entities
     drawn = 0
     skipped_text = 0
 
@@ -264,10 +394,6 @@ def render_dxf(dxf_path, output_path, dpi=150):
             try:
                 ves = list(entity.virtual_entities())
 
-                # Debug: log first 5 INSERTs
-                if insert_count <= 5:
-                    log(f"   INSERT #{insert_count} '{entity.dxf.name}': {len(ves)} virtual entities")
-
                 if len(ves) > 0:
                     blocks_with_content += 1
 
@@ -283,26 +409,15 @@ def render_dxf(dxf_path, output_path, dpi=150):
                         draw_entity(ve)
 
             except Exception as ex:
-                if insert_count <= 5:
-                    log(f"   Block expand error on '{entity.dxf.name}': {ex}")
+                pass
 
     pass2_drawn = drawn - pass1_drawn
     log(f"   Pass 2 (blocks): {insert_count} INSERTs, {blocks_with_content} had content, {pass2_drawn} entities drawn")
     log(f"   TOTAL: {drawn} entities drawn, {skipped_text} text skipped")
 
-    # Let matplotlib auto-calculate bounds from drawn data
-    ax.autoscale_view()
-
-    # Verify bounds aren't degenerate
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    log(f"   Bounds: X[{xlim[0]:.1f}, {xlim[1]:.1f}] Y[{ylim[0]:.1f}, {ylim[1]:.1f}]")
-
-    if xlim[0] == xlim[1] or ylim[0] == ylim[1]:
-        log("   ERROR: Degenerate bounds — nothing visible!")
-
+    # Save figure
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
-                facecolor='white', pad_inches=0.5)
+                facecolor='white', pad_inches=0.3)
     plt.close(fig)
 
     # Check output size
@@ -311,6 +426,8 @@ def render_dxf(dxf_path, output_path, dpi=150):
 
     if size_kb < 50:
         log("   WARNING: Image very small — likely blank!")
+    elif size_kb > 500:
+        log("   SUCCESS: Image has substantial content")
 
     return output_path
 
@@ -457,7 +574,7 @@ def main():
     start = datetime.now()
 
     log('=' * 50)
-    log('DXF RENDERER v5 (PROVEN - block expansion fixed)')
+    log('DXF RENDERER v6 (SMART BOUNDS - outlier exclusion)')
     log(f'File: {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
     log('=' * 50)
 
