@@ -3,10 +3,10 @@
 DXF Fire Safety Analyzer - Python Pipeline
 Renders DXF to high-res image using ezdxf + matplotlib, then outputs for Claude Vision analysis.
 
-v2: Fixed Hebrew text encoding (ANSI_1255 / cp1255) crash in matplotlib
+v3: Fixed stdout/stderr separation - all logs to stderr, only JSON to stdout
 
 Usage:
-    python analyze_dxf.py input.dxf --output /tmp/output_dir
+    python analyze_dxf.py input.dxf --output /tmp/output_dir --json
 """
 
 import os
@@ -15,6 +15,12 @@ import json
 import argparse
 import tempfile
 from datetime import datetime
+
+
+def log(msg):
+    """Print log message to stderr (not stdout) to keep JSON output clean."""
+    print(msg, file=sys.stderr)
+
 
 # Try to import dependencies
 try:
@@ -26,7 +32,7 @@ except ImportError:
     try:
         import ezdxf
     except ImportError:
-        print("ERROR: ezdxf not installed. Run: pip install ezdxf")
+        log("ERROR: ezdxf not installed. Run: pip install ezdxf")
         sys.exit(1)
 
 try:
@@ -35,13 +41,13 @@ try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
 except ImportError:
-    print("ERROR: matplotlib not installed. Run: pip install matplotlib")
+    log("ERROR: matplotlib not installed. Run: pip install matplotlib")
     sys.exit(1)
 
 try:
     from PIL import Image
 except ImportError:
-    print("ERROR: Pillow not installed. Run: pip install Pillow")
+    log("ERROR: Pillow not installed. Run: pip install Pillow")
     sys.exit(1)
 
 import numpy as np
@@ -100,26 +106,26 @@ def read_dxf_safe(filepath):
     # First try normal read (ezdxf handles codepage)
     try:
         doc = ezdxf.readfile(filepath)
-        print(f"   Loaded DXF with default encoding")
+        log(f"   Loaded DXF with default encoding")
         return doc
     except Exception as e:
-        print(f"   Default read failed: {e}")
+        log(f"   Default read failed: {e}")
 
     # Try forcing cp1255 (Hebrew Windows codepage)
     try:
         doc = ezdxf.readfile(filepath, encoding='cp1255')
-        print(f"   Loaded DXF with cp1255 encoding")
+        log(f"   Loaded DXF with cp1255 encoding")
         return doc
     except Exception as e:
-        print(f"   cp1255 read failed: {e}")
+        log(f"   cp1255 read failed: {e}")
 
     # Try ISO-8859-8 (Hebrew ISO)
     try:
         doc = ezdxf.readfile(filepath, encoding='iso-8859-8')
-        print(f"   Loaded DXF with iso-8859-8 encoding")
+        log(f"   Loaded DXF with iso-8859-8 encoding")
         return doc
     except Exception as e:
-        print(f"   iso-8859-8 read failed: {e}")
+        log(f"   iso-8859-8 read failed: {e}")
 
     # Last resort: read as bytes, transcode, save temp, re-read
     try:
@@ -138,10 +144,10 @@ def read_dxf_safe(filepath):
 
         doc = ezdxf.readfile(tmp.name)
         os.unlink(tmp.name)
-        print(f"   Loaded DXF via transcoding workaround")
+        log(f"   Loaded DXF via transcoding workaround")
         return doc
     except Exception as e:
-        print(f"   Transcoding workaround failed: {e}")
+        log(f"   Transcoding workaround failed: {e}")
 
     raise RuntimeError(f"Cannot read DXF with any encoding method")
 
@@ -161,13 +167,13 @@ def get_entity_color(entity):
 
 def render_dxf_with_addon(dxf_path, output_path, dpi=200):
     """Render DXF using ezdxf's matplotlib drawing addon."""
-    print(f"   Using ezdxf drawing addon...")
+    log(f"   Using ezdxf drawing addon...")
 
     doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
 
     entity_count = len(list(msp))
-    print(f"   Loaded {entity_count} entities from modelspace")
+    log(f"   Loaded {entity_count} entities from modelspace")
 
     fig = plt.figure(figsize=(40, 40))
     ax = fig.add_axes([0, 0, 1, 1])
@@ -184,13 +190,13 @@ def render_dxf_with_addon(dxf_path, output_path, dpi=200):
                 facecolor='white', pad_inches=0.5, format='png')
     plt.close(fig)
 
-    print(f"   Rendered to {output_path} at {dpi} DPI")
+    log(f"   Rendered to {output_path} at {dpi} DPI")
     return output_path
 
 
 def render_dxf_manual_with_text(dxf_path, output_path, dpi=200):
     """Manual rendering with sanitized text - parse entities and draw with matplotlib."""
-    print(f"   Using manual renderer WITH text...")
+    log(f"   Using manual renderer WITH text...")
 
     doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
@@ -366,21 +372,21 @@ def render_dxf_manual_with_text(dxf_path, output_path, dpi=200):
         except Exception:
             pass
 
-    print(f"   Drew {entity_count} entities + {insert_count} from block references")
-    print(f"   Text rendered: {text_count}, text errors: {text_errors}")
+    log(f"   Drew {entity_count} entities + {insert_count} from block references")
+    log(f"   Text rendered: {text_count}, text errors: {text_errors}")
 
     ax.autoscale()
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
                 facecolor='white', pad_inches=0.5, format='png')
     plt.close(fig)
 
-    print(f"   Rendered to {output_path}")
+    log(f"   Rendered to {output_path}")
     return output_path
 
 
 def render_dxf_no_text(dxf_path, output_path, dpi=200):
     """Manual rendering WITHOUT text - skips TEXT/MTEXT to avoid encoding crashes."""
-    print(f"   Using manual renderer WITHOUT text (geometry only)...")
+    log(f"   Using manual renderer WITHOUT text (geometry only)...")
 
     doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
@@ -517,14 +523,14 @@ def render_dxf_no_text(dxf_path, output_path, dpi=200):
         except Exception:
             pass
 
-    print(f"   Drew {entity_count} entities + {insert_count} from block references (no text)")
+    log(f"   Drew {entity_count} entities + {insert_count} from block references (no text)")
 
     ax.autoscale()
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
                 facecolor='white', pad_inches=0.5, format='png')
     plt.close(fig)
 
-    print(f"   Rendered to {output_path}")
+    log(f"   Rendered to {output_path}")
     return output_path
 
 
@@ -540,16 +546,16 @@ def render_dxf(dxf_path, output_path, dpi=200):
         try:
             return render_dxf_with_addon(dxf_path, output_path, dpi)
         except Exception as e:
-            print(f"   Addon failed: {e}")
+            log(f"   Addon failed: {e}")
 
     # Strategy 2: Manual renderer with sanitized text
     try:
         return render_dxf_manual_with_text(dxf_path, output_path, dpi)
     except Exception as e:
-        print(f"   Manual renderer with text failed: {e}")
+        log(f"   Manual renderer with text failed: {e}")
 
     # Strategy 3: Manual renderer without text (most robust)
-    print(f"   Falling back to geometry-only renderer...")
+    log(f"   Falling back to geometry-only renderer...")
     return render_dxf_no_text(dxf_path, output_path, dpi)
 
 
@@ -559,7 +565,7 @@ def split_into_zones(image_path, output_dir, grid=(3, 3)):
     img = Image.open(image_path)
     w, h = img.size
 
-    print(f"   Image size: {w}x{h}")
+    log(f"   Image size: {w}x{h}")
 
     cols, rows = grid
     zone_w, zone_h = w // cols, h // rows
@@ -582,7 +588,7 @@ def split_into_zones(image_path, output_dir, grid=(3, 3)):
             zone.convert('RGB').save(zone_path, 'JPEG', quality=90)
             paths.append(zone_path)
 
-    print(f"   Created {len(paths)} images (1 overview + {rows*cols} zones)")
+    log(f"   Created {len(paths)} images (1 overview + {rows*cols} zones)")
     return paths
 
 
@@ -666,33 +672,30 @@ def main():
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
-        print(f"ERROR: File not found: {args.input}", file=sys.stderr)
+        log(f"ERROR: File not found: {args.input}")
         sys.exit(1)
 
     os.makedirs(args.output, exist_ok=True)
 
     start = datetime.now()
 
-    if not args.json:
-        print('=' * 50)
-        print('🎨 DXF RENDERER v2 (Hebrew-safe)')
-        print(f'📁 {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
-        print('=' * 50)
+    # All progress logging goes to stderr
+    log('=' * 50)
+    log('DXF RENDERER v3 (Hebrew-safe, clean JSON output)')
+    log(f'File: {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
+    log('=' * 50)
 
     # Step 1: Render DXF to PNG
-    if not args.json:
-        print('🎨 Rendering DXF to high-res PNG...')
+    log('Rendering DXF to high-res PNG...')
     rendered_path = os.path.join(args.output, 'rendered_plan.png')
     render_dxf(args.input, rendered_path, dpi=args.dpi)
 
     # Step 2: Split into zones
-    if not args.json:
-        print('🔍 Splitting into analysis zones...')
+    log('Splitting into analysis zones...')
     image_paths = split_into_zones(rendered_path, args.output)
 
     # Step 3: Extract metadata
-    if not args.json:
-        print('📊 Extracting DXF metadata...')
+    log('Extracting DXF metadata...')
     metadata = extract_metadata(args.input)
 
     # Save metadata
@@ -713,16 +716,18 @@ def main():
         'processing_time': elapsed
     }
 
+    # Summary to stderr
+    log('=' * 50)
+    log(f'Complete in {elapsed:.1f}s')
+    log(f'Rendered: {rendered_path}')
+    log(f'Entities: {metadata["total_entities"]}')
+    log(f'Layers: {metadata["layer_count"]}')
+    log(f'Texts: {metadata["text_count"]}')
+    log('=' * 50)
+
+    # ONLY the JSON result goes to stdout
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
-    else:
-        print('=' * 50)
-        print(f'✅ Complete in {elapsed:.1f}s')
-        print(f'🖼️  Rendered: {rendered_path}')
-        print(f'📊 Entities: {metadata["total_entities"]}')
-        print(f'📄 Layers: {metadata["layer_count"]}')
-        print(f'📝 Texts: {metadata["text_count"]}')
-        print('=' * 50)
 
     return result
 

@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.9
+ * Fire Safety & Compliance Checker - Server v37.10
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Python ezdxf + matplotlib for high-quality rendering
  *
- * v37.9: Fixed Hebrew text encoding crash in matplotlib, added text sanitizer
+ * v37.10: Fixed stdout/stderr separation - Python logs to stderr, only JSON to stdout
  */
 
 const express = require('express');
@@ -814,8 +814,19 @@ async function renderDXFWithPython(dxfPath, outputDir) {
       maxBuffer: 50 * 1024 * 1024  // 50MB buffer
     });
 
-    // Parse JSON output
-    const jsonResult = JSON.parse(result.trim());
+    // Parse JSON output - extract JSON from output in case any log messages leaked through
+    let jsonResult;
+    const trimmed = result.trim();
+    const jsonStart = trimmed.indexOf('{');
+    const jsonEnd = trimmed.lastIndexOf('}');
+
+    if (jsonStart >= 0 && jsonEnd > jsonStart) {
+      const jsonStr = trimmed.substring(jsonStart, jsonEnd + 1);
+      jsonResult = JSON.parse(jsonStr);
+    } else {
+      // Fallback: try parsing the whole thing
+      jsonResult = JSON.parse(trimmed);
+    }
 
     if (!jsonResult.success) {
       console.log('⚠️ Python render reported failure');
@@ -1325,7 +1336,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.9.0',
+    version: '37.10.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     python: pythonStatus,
@@ -2147,7 +2158,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.9');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.10');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);

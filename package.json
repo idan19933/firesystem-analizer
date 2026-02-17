@@ -1,6 +1,6 @@
 {
   "name": "fire-safety-checker",
-  "version": "37.9.0",
+  "version": "37.10.0",
   "description": "Fire Safety & Building Permit Compliance Checker",
   "main": "server.js",
   "scripts": {
