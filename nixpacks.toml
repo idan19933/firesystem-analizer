@@ -1,24 +1,33 @@
 # Nixpacks configuration for Railway
-# Comprehensive Chromium/Puppeteer + Python/ezdxf dependencies
+# Python + Node.js for DXF rendering with ezdxf
 
 [phases.setup]
+# Use Nix packages (nixPkgs), not apt packages
+nixPkgs = [
+  "python311",
+  "python311Packages.pip",
+  "python311Packages.numpy",
+  "python311Packages.pillow",
+  "python311Packages.matplotlib",
+  # Chromium for Puppeteer
+  "chromium",
+  # Fonts for Hebrew text
+  "noto-fonts",
+  "dejavu_fonts"
+]
+
+# Also install apt packages for Puppeteer dependencies
 aptPkgs = [
-  # Chromium/Puppeteer dependencies
   "ca-certificates",
   "fonts-liberation",
-  "libappindicator1",
   "libasound2",
   "libatk1.0-0",
-  "libatomic1",
-  "libc6",
   "libcairo2",
   "libcups2",
   "libdbus-1-3",
   "libexpat1",
   "libfontconfig1",
   "libgbm1",
-  "libgcc1",
-  "libgconf-2-4",
   "libgdk-pixbuf2.0-0",
   "libglib2.0-0",
   "libgtk-3-0",
@@ -26,7 +35,6 @@ aptPkgs = [
   "libnss3",
   "libpango-1.0-0",
   "libpangocairo-1.0-0",
-  "libstdc++6",
   "libx11-6",
   "libx11-xcb1",
   "libxcb1",
@@ -40,25 +48,13 @@ aptPkgs = [
   "libxrender1",
   "libxss1",
   "libxtst6",
-  "lsb-release",
-  "wget",
-  "xdg-utils",
-  "xvfb",
-  "chromium",
-  "libredwg-tools",
-  # Python for DXF rendering
-  "python3",
-  "python3-pip",
-  "python3-dev",
-  # Hebrew fonts for matplotlib text rendering
-  "fonts-noto",
-  "fonts-dejavu"
+  "xvfb"
 ]
 
 [phases.install]
 cmds = [
   "npm install",
-  "pip3 install --user ezdxf matplotlib Pillow numpy"
+  "pip install ezdxf matplotlib Pillow numpy --break-system-packages || pip3 install ezdxf matplotlib Pillow numpy --user || true"
 ]
 
 [variables]

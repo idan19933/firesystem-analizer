@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.7
+ * Fire Safety & Compliance Checker - Server v37.8
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,7 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Python ezdxf + matplotlib for high-quality rendering
  *
- * v37.7: Python ezdxf renderer for better DXF quality, fallback to JS renderer
+ * v37.8: Dockerfile for Railway with Python/ezdxf, improved Python detection
  */
 
 const express = require('express');
@@ -758,16 +758,42 @@ async function renderDXFWithPython(dxfPath, outputDir) {
     return null;
   }
 
-  // Check if Python is available
-  let pythonCmd = 'python3';
-  try {
-    execSync('python3 --version', { stdio: 'pipe' });
-  } catch (e) {
+  // Check if Python is available - try multiple commands
+  let pythonCmd = null;
+  const pythonCommands = ['python3', 'python', '/usr/bin/python3', '/usr/bin/python'];
+
+  for (const cmd of pythonCommands) {
     try {
-      execSync('python --version', { stdio: 'pipe' });
-      pythonCmd = 'python';
+      const version = execSync(`${cmd} --version 2>&1`, { stdio: 'pipe', encoding: 'utf8' });
+      console.log(`   Found Python: ${cmd} -> ${version.trim()}`);
+      pythonCmd = cmd;
+      break;
+    } catch (e) {
+      // Continue to next command
+    }
+  }
+
+  if (!pythonCmd) {
+    console.log('⚠️ Python not available on this system');
+    console.log('   Tried:', pythonCommands.join(', '));
+    return null;
+  }
+
+  // Check if ezdxf is installed
+  try {
+    const ezdxfVersion = execSync(`${pythonCmd} -c "import ezdxf; print(ezdxf.__version__)"`, { stdio: 'pipe', encoding: 'utf8' });
+    console.log(`   ezdxf version: ${ezdxfVersion.trim()}`);
+  } catch (e) {
+    console.log('⚠️ ezdxf not installed. Attempting pip install...');
+    try {
+      execSync(`${pythonCmd} -m pip install ezdxf matplotlib Pillow numpy --user --quiet 2>&1 || ${pythonCmd} -m pip install ezdxf matplotlib Pillow numpy --break-system-packages --quiet 2>&1`, {
+        stdio: 'pipe',
+        timeout: 180000,
+        encoding: 'utf8'
+      });
+      console.log('   ezdxf installed successfully');
     } catch (e2) {
-      console.log('⚠️ Python not available on this system');
+      console.log('⚠️ Failed to install ezdxf:', e2.message?.substring(0, 200) || 'unknown error');
       return null;
     }
   }
@@ -1278,11 +1304,32 @@ app.get('/api/health', (req, res) => {
     } catch (e) {}
   }
 
+  // Check Python availability
+  let pythonStatus = 'not available';
+  let ezdxfStatus = 'not installed';
+  const pythonCommands = ['python3', 'python', '/usr/bin/python3'];
+  for (const cmd of pythonCommands) {
+    try {
+      const version = execSync(`${cmd} --version 2>&1`, { stdio: 'pipe', encoding: 'utf8' });
+      pythonStatus = version.trim();
+      // Check ezdxf
+      try {
+        const ezdxfVersion = execSync(`${cmd} -c "import ezdxf; print(ezdxf.__version__)" 2>&1`, { stdio: 'pipe', encoding: 'utf8' });
+        ezdxfStatus = ezdxfVersion.trim();
+      } catch (e) {
+        ezdxfStatus = 'not installed';
+      }
+      break;
+    } catch (e) {}
+  }
+
   res.json({
     status: 'ok',
-    version: '37.7.0',
+    version: '37.8.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
+    python: pythonStatus,
+    ezdxf: ezdxfStatus,
     aps: APS_CLIENT_ID ? 'configured' : 'not configured',
     claude: ANTHROPIC_API_KEY ? 'configured' : 'not configured',
     modes: ['fire-safety', 'compliance'],
@@ -2100,7 +2147,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.7');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.8');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
