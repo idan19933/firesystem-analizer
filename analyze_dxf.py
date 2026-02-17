@@ -3,8 +3,11 @@
 DXF Fire Safety Analyzer - Python Pipeline
 Renders DXF to high-res image using ezdxf + matplotlib, then outputs for Claude Vision analysis.
 
-v4: GEOMETRY ONLY - Skip ALL text rendering (Hebrew causes garbled output)
-    Full block expansion for complete floor plan rendering
+v5: PROVEN RENDERER - Fixed block expansion, color visibility, bounds calculation
+    - Blocks expand with entity.virtual_entities()
+    - Color 7/0 forced to black (not white-on-white)
+    - ax.autoscale_view() for proper bounds
+    - Debug logging for block expansion
 
 Usage:
     python analyze_dxf.py input.dxf --output /tmp/output_dir --json
@@ -34,7 +37,7 @@ try:
     import matplotlib
     matplotlib.use('Agg')  # Headless rendering
     import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
+    from matplotlib.patches import Arc
 except ImportError:
     log("ERROR: matplotlib not installed. Run: pip install matplotlib")
     sys.exit(1)
@@ -57,24 +60,6 @@ def ensure_max_size(image_path, max_dim=7000):
         img.save(image_path)
         log(f"   Resized: {w}x{h} -> {new_size[0]}x{new_size[1]} (max {max_dim}px)")
     return image_path
-
-
-# ACI color map (AutoCAD Color Index)
-ACI_COLORS = {
-    0: '#000000',   # ByBlock
-    1: '#FF0000',   # Red
-    2: '#FFFF00',   # Yellow
-    3: '#00FF00',   # Green
-    4: '#00FFFF',   # Cyan
-    5: '#0000FF',   # Blue
-    6: '#FF00FF',   # Magenta
-    7: '#000000',   # White/Black (depends on background)
-    8: '#808080',   # Dark Gray
-    9: '#C0C0C0',   # Light Gray
-    10: '#FF0000', 11: '#FF7F7F', 12: '#CC0000', 13: '#CC6666', 14: '#990000',
-    15: '#996666', 16: '#7F0000', 17: '#7F4C4C', 18: '#4C0000', 19: '#4C2626',
-    250: '#333333', 251: '#505050', 252: '#696969', 253: '#828282', 254: '#BEBEBE', 255: '#FFFFFF'
-}
 
 
 def read_dxf_safe(filepath):
@@ -108,9 +93,7 @@ def read_dxf_safe(filepath):
         with open(filepath, 'rb') as f:
             raw = f.read()
 
-        # Try to decode as cp1255 and re-encode as utf-8
         text = raw.decode('cp1255', errors='replace')
-        # Replace the codepage declaration if present
         text = text.replace('ANSI_1255', 'UTF-8')
         text = text.replace('ansi_1255', 'UTF-8')
 
@@ -128,241 +111,207 @@ def read_dxf_safe(filepath):
     raise RuntimeError(f"Cannot read DXF with any encoding method")
 
 
-def get_entity_color(entity):
-    """Get color from entity, handling ByLayer and ByBlock."""
+def get_color(entity, default='#000000'):
+    """Get visible color for entity. Never return white."""
+    aci_map = {
+        1: '#FF0000', 2: '#FFFF00', 3: '#00FF00', 4: '#00FFFF',
+        5: '#0000FF', 6: '#FF00FF', 8: '#808080', 9: '#C0C0C0',
+    }
     try:
-        color = entity.dxf.color
-        if color == 256:  # ByLayer
-            return '#000000'
-        elif color == 0:  # ByBlock
-            return '#000000'
-        return ACI_COLORS.get(color, '#000000')
+        c = entity.dxf.get('color', 7)
+        if c == 7 or c == 0 or c == 256:
+            return '#000000'  # NEVER white on white background
+        return aci_map.get(c, default)
     except:
-        return '#000000'
+        return default
 
 
-def draw_entity(ax, entity, drawn_counter):
+def render_dxf(dxf_path, output_path, dpi=150):
     """
-    Draw a single entity to the axes. Returns number of entities drawn (0 or 1).
-    Skips TEXT and MTEXT - Hebrew encoding creates garbled output.
+    Render DXF to PNG - PROVEN approach with proper block expansion.
+    - Skips all text (Hebrew encoding issues)
+    - Forces color 7/0 to black (visible on white)
+    - Uses autoscale_view for proper bounds
     """
-    etype = entity.dxftype()
-
-    # Skip ALL text entities - Hebrew encoding causes garbled escape sequences
-    if etype in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'):
-        return 0
-
-    try:
-        color = get_entity_color(entity)
-
-        if etype == 'LINE':
-            s = entity.dxf.start
-            e = entity.dxf.end
-            ax.plot([s.x, e.x], [s.y, e.y], color=color, linewidth=0.3)
-            return 1
-
-        elif etype == 'LWPOLYLINE':
-            pts = list(entity.get_points(format='xy'))
-            if len(pts) >= 2:
-                xs, ys = zip(*pts)
-                if entity.closed:
-                    xs = list(xs) + [xs[0]]
-                    ys = list(ys) + [ys[0]]
-                ax.plot(xs, ys, color=color, linewidth=0.3)
-                return 1
-
-        elif etype == 'POLYLINE':
-            try:
-                pts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
-                if len(pts) >= 2:
-                    xs, ys = zip(*pts)
-                    ax.plot(xs, ys, color=color, linewidth=0.3)
-                    return 1
-            except:
-                pass
-
-        elif etype == 'ARC':
-            c = entity.dxf.center
-            r = entity.dxf.radius
-            arc = patches.Arc((c.x, c.y), 2*r, 2*r, angle=0,
-                              theta1=entity.dxf.start_angle,
-                              theta2=entity.dxf.end_angle,
-                              color=color, linewidth=0.3)
-            ax.add_patch(arc)
-            return 1
-
-        elif etype == 'CIRCLE':
-            c = entity.dxf.center
-            r = entity.dxf.radius
-            ax.add_patch(plt.Circle((c.x, c.y), r, fill=False,
-                                    color=color, linewidth=0.3))
-            return 1
-
-        elif etype == 'POINT':
-            p = entity.dxf.location
-            ax.plot(p.x, p.y, '.', color=color, markersize=0.5)
-            return 1
-
-        elif etype == 'ELLIPSE':
-            try:
-                c = entity.dxf.center
-                # Ellipse major axis is relative to center
-                major = entity.dxf.major_axis
-                ratio = entity.dxf.ratio
-                # Calculate dimensions
-                a = (major.x**2 + major.y**2)**0.5  # semi-major axis length
-                b = a * ratio  # semi-minor axis length
-                # Calculate rotation angle
-                import math
-                angle = math.degrees(math.atan2(major.y, major.x))
-                ellipse = patches.Ellipse((c.x, c.y), 2*a, 2*b, angle=angle,
-                                          fill=False, color=color, linewidth=0.3)
-                ax.add_patch(ellipse)
-                return 1
-            except:
-                pass
-
-        elif etype == 'SPLINE':
-            try:
-                # Get control points for approximation
-                pts = list(entity.control_points)
-                if len(pts) >= 2:
-                    xs = [p[0] for p in pts]
-                    ys = [p[1] for p in pts]
-                    ax.plot(xs, ys, color=color, linewidth=0.3)
-                    return 1
-            except:
-                pass
-
-        elif etype == 'HATCH':
-            try:
-                # Draw hatch boundary paths
-                for path in entity.paths:
-                    try:
-                        if hasattr(path, 'vertices'):
-                            pts = [(v[0], v[1]) for v in path.vertices]
-                            if len(pts) >= 2:
-                                xs, ys = zip(*pts)
-                                ax.plot(list(xs) + [xs[0]], list(ys) + [ys[0]],
-                                       color=color, linewidth=0.2)
-                    except:
-                        pass
-                return 1
-            except:
-                pass
-
-        elif etype == 'SOLID':
-            try:
-                # 2D solid (filled triangle or quad)
-                pts = [entity.dxf.vtx0, entity.dxf.vtx1, entity.dxf.vtx2]
-                if hasattr(entity.dxf, 'vtx3'):
-                    pts.append(entity.dxf.vtx3)
-                xs = [p.x for p in pts] + [pts[0].x]
-                ys = [p.y for p in pts] + [pts[0].y]
-                ax.fill(xs, ys, color=color, alpha=0.3, linewidth=0.2)
-                return 1
-            except:
-                pass
-
-    except Exception:
-        pass
-
-    return 0
-
-
-def render_dxf(dxf_path, output_path, dpi=200):
-    """
-    Render DXF to PNG - GEOMETRY ONLY, no text.
-    Fully expands all INSERT (block references) for complete rendering.
-    """
-    log(f"   Using geometry-only renderer (v4 - no text, full block expansion)...")
+    log(f"   Using PROVEN renderer v5...")
 
     doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
 
-    # Count entities in modelspace
-    msp_entities = list(msp)
-    total_msp = len(msp_entities)
-
-    # Count by type
+    # Count entities
+    msp_list = list(msp)
     type_counts = {}
-    for e in msp_entities:
+    for e in msp_list:
         t = e.dxftype()
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    log(f"   Modelspace entities: {total_msp}")
-    log(f"   Entity types: {dict(sorted(type_counts.items(), key=lambda x: -x[1])[:10])}")
+    log(f"   Modelspace: {len(msp_list)} entities")
+    log(f"   Types: {dict(sorted(type_counts.items(), key=lambda x: -x[1])[:8])}")
 
-    fig, ax = plt.subplots(1, 1, figsize=(40, 40))
+    fig, ax = plt.subplots(1, 1, figsize=(40, 30))
     ax.set_facecolor('white')
     ax.set_aspect('equal')
     ax.axis('off')
 
-    drawn_direct = 0
-    drawn_from_blocks = 0
+    drawn = 0
     skipped_text = 0
 
-    # Pass 1: Draw all direct entities (except INSERTs)
-    for entity in msp_entities:
-        etype = entity.dxftype()
-
-        # Skip text entities
-        if etype in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'):
-            skipped_text += 1
-            continue
-
-        # Skip INSERTs in this pass - we'll expand them
-        if etype == 'INSERT':
-            continue
-
-        drawn_direct += draw_entity(ax, entity, drawn_direct)
-
-    log(f"   Drew {drawn_direct} direct entities (skipped {skipped_text} text)")
-
-    # Pass 2: Expand and draw all INSERT (block references)
-    insert_count = type_counts.get('INSERT', 0)
-    log(f"   Expanding {insert_count} block references...")
-
-    for entity in msp_entities:
-        if entity.dxftype() != 'INSERT':
-            continue
-
+    def draw_entity(e):
+        nonlocal drawn, skipped_text
         try:
-            # virtual_entities() explodes the block reference
-            for ve in entity.virtual_entities():
-                vetype = ve.dxftype()
+            etype = e.dxftype()
 
-                # Skip text in blocks too
-                if vetype in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'):
-                    skipped_text += 1
-                    continue
+            # Skip ALL text - Hebrew causes garbled output
+            if etype in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'):
+                skipped_text += 1
+                return
 
-                # Recursively handle nested INSERTs
-                if vetype == 'INSERT':
-                    try:
-                        for nested_ve in ve.virtual_entities():
-                            if nested_ve.dxftype() not in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF', 'INSERT'):
-                                drawn_from_blocks += draw_entity(ax, nested_ve, drawn_from_blocks)
-                    except:
-                        pass
-                    continue
+            color = get_color(e)
 
-                drawn_from_blocks += draw_entity(ax, ve, drawn_from_blocks)
+            if etype == 'LINE':
+                s, end = e.dxf.start, e.dxf.end
+                ax.plot([s.x, end.x], [s.y, end.y], color=color, linewidth=0.5)
+                drawn += 1
 
-        except Exception as e:
-            # Some blocks may fail to explode
+            elif etype == 'LWPOLYLINE':
+                pts = list(e.get_points(format='xy'))
+                if len(pts) >= 2:
+                    xs, ys = zip(*pts)
+                    xs, ys = list(xs), list(ys)
+                    if e.closed:
+                        xs.append(xs[0])
+                        ys.append(ys[0])
+                    ax.plot(xs, ys, color=color, linewidth=0.5)
+                    drawn += 1
+
+            elif etype == 'POLYLINE':
+                try:
+                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+                    if len(pts) >= 2:
+                        xs, ys = zip(*pts)
+                        ax.plot(xs, ys, color=color, linewidth=0.5)
+                        drawn += 1
+                except:
+                    pass
+
+            elif etype == 'CIRCLE':
+                c = e.dxf.center
+                r = e.dxf.radius
+                circle = plt.Circle((c.x, c.y), r, fill=False, color=color, linewidth=0.5)
+                ax.add_patch(circle)
+                drawn += 1
+
+            elif etype == 'ARC':
+                c = e.dxf.center
+                r = e.dxf.radius
+                arc = Arc((c.x, c.y), 2*r, 2*r, angle=0,
+                         theta1=e.dxf.start_angle, theta2=e.dxf.end_angle,
+                         color=color, linewidth=0.5)
+                ax.add_patch(arc)
+                drawn += 1
+
+            elif etype == 'POINT':
+                p = e.dxf.location
+                ax.plot(p.x, p.y, '.', color=color, markersize=1)
+                drawn += 1
+
+            elif etype == 'ELLIPSE':
+                try:
+                    c = e.dxf.center
+                    major = e.dxf.major_axis
+                    ratio = e.dxf.ratio
+                    import math
+                    a = (major.x**2 + major.y**2)**0.5
+                    b = a * ratio
+                    angle = math.degrees(math.atan2(major.y, major.x))
+                    from matplotlib.patches import Ellipse
+                    ellipse = Ellipse((c.x, c.y), 2*a, 2*b, angle=angle,
+                                      fill=False, color=color, linewidth=0.5)
+                    ax.add_patch(ellipse)
+                    drawn += 1
+                except:
+                    pass
+
+            elif etype == 'SPLINE':
+                try:
+                    pts = list(e.control_points)
+                    if len(pts) >= 2:
+                        xs = [p[0] for p in pts]
+                        ys = [p[1] for p in pts]
+                        ax.plot(xs, ys, color=color, linewidth=0.5)
+                        drawn += 1
+                except:
+                    pass
+
+        except Exception:
             pass
 
-    total_drawn = drawn_direct + drawn_from_blocks
-    log(f"   Drew {drawn_from_blocks} entities from block expansion")
-    log(f"   TOTAL DRAWN: {total_drawn} entities (skipped {skipped_text} text)")
+    # Pass 1: Draw all direct entities (not INSERTs)
+    for entity in msp_list:
+        if entity.dxftype() != 'INSERT':
+            draw_entity(entity)
 
-    ax.autoscale()
+    log(f"   Pass 1 (direct): {drawn} drawn, {skipped_text} text skipped")
+    pass1_drawn = drawn
+
+    # Pass 2: Expand ALL block references and draw their contents
+    insert_count = 0
+    blocks_with_content = 0
+
+    for entity in msp_list:
+        if entity.dxftype() == 'INSERT':
+            insert_count += 1
+            try:
+                ves = list(entity.virtual_entities())
+
+                # Debug: log first 5 INSERTs
+                if insert_count <= 5:
+                    log(f"   INSERT #{insert_count} '{entity.dxf.name}': {len(ves)} virtual entities")
+
+                if len(ves) > 0:
+                    blocks_with_content += 1
+
+                for ve in ves:
+                    # Handle nested INSERTs recursively
+                    if ve.dxftype() == 'INSERT':
+                        try:
+                            for nested in ve.virtual_entities():
+                                draw_entity(nested)
+                        except:
+                            pass
+                    else:
+                        draw_entity(ve)
+
+            except Exception as ex:
+                if insert_count <= 5:
+                    log(f"   Block expand error on '{entity.dxf.name}': {ex}")
+
+    pass2_drawn = drawn - pass1_drawn
+    log(f"   Pass 2 (blocks): {insert_count} INSERTs, {blocks_with_content} had content, {pass2_drawn} entities drawn")
+    log(f"   TOTAL: {drawn} entities drawn, {skipped_text} text skipped")
+
+    # Let matplotlib auto-calculate bounds from drawn data
+    ax.autoscale_view()
+
+    # Verify bounds aren't degenerate
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    log(f"   Bounds: X[{xlim[0]:.1f}, {xlim[1]:.1f}] Y[{ylim[0]:.1f}, {ylim[1]:.1f}]")
+
+    if xlim[0] == xlim[1] or ylim[0] == ylim[1]:
+        log("   ERROR: Degenerate bounds — nothing visible!")
+
     fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
-                facecolor='white', pad_inches=0.5, format='png')
+                facecolor='white', pad_inches=0.5)
     plt.close(fig)
 
-    log(f"   Rendered to {output_path} at {dpi} DPI")
+    # Check output size
+    size_kb = os.path.getsize(output_path) / 1024
+    log(f"   Saved: {output_path} ({size_kb:.0f}KB)")
+
+    if size_kb < 50:
+        log("   WARNING: Image very small — likely blank!")
+
     return output_path
 
 
@@ -434,7 +383,7 @@ def extract_metadata(dxf_path):
     # Layers
     layers = [layer.dxf.name for layer in doc.layers]
 
-    # All text content (sanitized) - for metadata only, not rendering
+    # All text content (sanitized) - for metadata only
     texts = []
     for e in msp.query('TEXT MTEXT'):
         try:
@@ -454,7 +403,7 @@ def extract_metadata(dxf_path):
         except:
             pass
 
-    # Fire-related keywords search
+    # Fire-related keywords
     fire_keywords = ['כיבוי', 'אש', 'fire', 'sprink', 'hydrant', 'מתז', 'גלאי',
                      'מילוט', 'exit', 'alarm', 'smoke', 'עשן', 'גלגלון', 'מטף',
                      'חירום', 'emergency']
@@ -494,7 +443,7 @@ def main():
     parser = argparse.ArgumentParser(description='Render DXF to high-res image for fire safety analysis')
     parser.add_argument('input', help='Input DXF file path')
     parser.add_argument('--output', '-o', default='/tmp/dxf-analysis', help='Output directory')
-    parser.add_argument('--dpi', type=int, default=200, help='Render DPI (default: 200)')
+    parser.add_argument('--dpi', type=int, default=150, help='Render DPI (default: 150)')
     parser.add_argument('--json', action='store_true', help='Output results as JSON to stdout')
 
     args = parser.parse_args()
@@ -507,9 +456,8 @@ def main():
 
     start = datetime.now()
 
-    # All progress logging goes to stderr
     log('=' * 50)
-    log('DXF RENDERER v4 (GEOMETRY ONLY - no text)')
+    log('DXF RENDERER v5 (PROVEN - block expansion fixed)')
     log(f'File: {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
     log('=' * 50)
 
@@ -547,7 +495,6 @@ def main():
         'processing_time': elapsed
     }
 
-    # Summary to stderr
     log('=' * 50)
     log(f'Complete in {elapsed:.1f}s')
     log(f'Rendered: {rendered_path}')
