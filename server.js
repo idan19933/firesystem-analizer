@@ -1136,6 +1136,38 @@ async function renderVectorsToImage(parsed, classified, outputPath) {
   }
 }
 
+// ===== DETECT IMAGE MEDIA TYPE =====
+function getMediaType(bufferOrPath) {
+  // If it's a path string, read file extension first
+  if (typeof bufferOrPath === 'string') {
+    const ext = path.extname(bufferOrPath).toLowerCase();
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+    if (ext === '.png') return 'image/png';
+    if (ext === '.webp') return 'image/webp';
+    if (ext === '.gif') return 'image/gif';
+    // If no clear extension, read the file and check magic bytes
+    bufferOrPath = fs.readFileSync(bufferOrPath);
+  }
+
+  // Check magic bytes
+  if (Buffer.isBuffer(bufferOrPath) && bufferOrPath.length >= 4) {
+    const b = bufferOrPath;
+    // JPEG: FF D8 FF
+    if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image/jpeg';
+    // PNG: 89 50 4E 47
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
+    // WebP: RIFF....WEBP
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b.length >= 12) {
+      if (b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+    }
+    // GIF: GIF8
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
+  }
+
+  // Default to PNG
+  return 'image/png';
+}
+
 // ===== SPLIT INTO 9 ZONES =====
 async function splitIntoZones(imageBuffer) {
   if (!sharp) {
@@ -1176,17 +1208,30 @@ async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
     throw new Error('ANTHROPIC_API_KEY not configured');
   }
 
-  console.log('🤖 Sending to Claude Vision (10 images)...');
+  console.log('🤖 Sending to Claude Vision...');
 
-  // Build image array: full image + 9 zones
-  const images = [fullImage, ...zones].map(buf => ({
-    type: "image",
-    source: {
-      type: "base64",
-      media_type: "image/png",
-      data: buf.toString('base64')
+  // Build image array: full image + 9 zones (filter out empty/broken images)
+  const allBuffers = [fullImage, ...zones];
+  const images = [];
+
+  for (let i = 0; i < allBuffers.length; i++) {
+    const buf = allBuffers[i];
+    if (!buf || buf.length < 100) {
+      console.log(`⚠️ Skipping empty/broken image at index ${i}`);
+      continue;
     }
-  }));
+    const mediaType = getMediaType(buf);
+    images.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: mediaType,
+        data: buf.toString('base64')
+      }
+    });
+  }
+
+  console.log(`   Sending ${images.length} valid images to Claude Vision`);
 
   const textContent = {
     type: "text",
@@ -1793,15 +1838,26 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
     let complianceResult;
 
     if (fullImage && zones.length > 0) {
-      // Vision-based analysis
-      const images = [fullImage, ...zones].map(buf => ({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: "image/png",
-          data: buf.toString('base64')
+      // Vision-based analysis with proper media type detection
+      const allBuffers = [fullImage, ...zones];
+      const images = [];
+      for (let i = 0; i < allBuffers.length; i++) {
+        const buf = allBuffers[i];
+        // Skip empty or corrupted images
+        if (!buf || buf.length < 100) {
+          console.log(`⚠️ Compliance: Skipping empty/broken image at index ${i}`);
+          continue;
         }
-      }));
+        const mediaType = getMediaType(buf);
+        images.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: mediaType,
+            data: buf.toString('base64')
+          }
+        });
+      }
 
       const textContent = {
         type: "text",
