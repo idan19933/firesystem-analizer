@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""analyze_dxf.py v8.2 — Batch render + section detection + fixed crashes"""
+"""analyze_dxf.py v8.3 — Batch render + section detection (no merge)"""
 import sys, json, os, time
 
 def log(msg):
@@ -160,7 +160,7 @@ def analyze(dxf_path, output_dir):
 
         sections = []
         sec_start = xmin
-        min_w = width * 0.05  # minimum 5% of total width (was 3%)
+        min_w = width * 0.03  # minimum 3% of total width
 
         for idx in gap_indices:
             gap_x = float((edges[idx] + edges[idx + 1]) / 2)
@@ -170,25 +170,14 @@ def analyze(dxf_path, output_dir):
         if xmax - sec_start > min_w:
             sections.append((sec_start, xmax))
 
-        log(f"Found {len(sections)} raw sections")
-
-        # Only merge if gap is truly negligible (< 5 units absolute)
-        # Previous logic used width*0.02 which was ~60 units and merged everything
-        merged_sections = []
-        for sx0, sx1 in sections:
-            if merged_sections and (sx0 - merged_sections[-1][1]) < 5:
-                # Gap < 5 units — merge with previous
-                merged_sections[-1] = (merged_sections[-1][0], sx1)
-            else:
-                merged_sections.append((sx0, sx1))
-        sections = merged_sections
-        log(f"After merging: {len(sections)} sections")
+        # NO MERGING — use raw sections as-is (merging was causing all sections to become 1)
+        log(f"Found {len(sections)} sections")
 
         for i, (sx0, sx1) in enumerate(sections):
             sw = sx1 - sx0
             sa = sw / max(height, 1)
-            sf_h = 18  # taller for more detail (was 15)
-            sf_w = max(sf_h * sa, 5)  # minimum 5 inches wide (was 4)
+            sf_h = 15
+            sf_w = max(min(sf_h * sa, 40), 4)  # between 4 and 40 inches to prevent huge images
 
             fig, ax = plt.subplots(1, 1, figsize=(sf_w, sf_h))
             ax.set_facecolor('white'); ax.set_aspect('equal'); ax.axis('off')
@@ -260,7 +249,7 @@ def analyze(dxf_path, output_dir):
     # ---- OUTPUT (only JSON on stdout) ----
     result = {
         'success': True,
-        'version': 'analyze_dxf v8.2',
+        'version': 'analyze_dxf v8.3',
         'is_flattened': is_flattened,
         'total_entities': total,
         'entity_counts': counts,
