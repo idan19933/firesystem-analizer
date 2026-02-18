@@ -673,6 +673,104 @@ async function captureHighResScreenshot(token, urn, outputPath) {
   }
 }
 
+// ===== APS THUMBNAIL API FALLBACK =====
+/**
+ * Get rendered image directly from APS using the Thumbnail/Derivative API
+ * This works without WebGL and is more reliable in headless environments
+ */
+async function getAPSThumbnail(token, urn, outputPath, size = 1024) {
+  console.log('📸 Getting thumbnail from APS API (fallback)...');
+
+  // Try different thumbnail sizes (largest first)
+  const sizes = [1024, 800, 400, 200];
+
+  for (const s of sizes) {
+    try {
+      const resp = await fetch(
+        `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/thumbnail?width=${s}&height=${s}`,
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+
+      if (resp.ok) {
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        if (buffer.length > 1000) {  // Ensure it's not an error response
+          fs.writeFileSync(outputPath, buffer);
+          console.log(`✅ APS thumbnail saved: ${s}x${s} (${(buffer.length/1024).toFixed(0)}KB)`);
+          return buffer;
+        }
+      }
+    } catch (e) {
+      console.log(`   Thumbnail ${s}x${s} failed: ${e.message}`);
+    }
+  }
+
+  // Try extracting rendered views from derivatives
+  console.log('   Trying to extract rendered views from derivatives...');
+  try {
+    const manifestResp = await fetch(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const manifest = await manifestResp.json();
+
+    // Look for thumbnail or rendered derivatives
+    function findDerivatives(node, results = []) {
+      if (node.role === 'thumbnail' || node.role === 'graphics' || node.role === '2d') {
+        results.push(node);
+      }
+      if (node.children) node.children.forEach(c => findDerivatives(c, results));
+      if (node.derivatives) node.derivatives.forEach(d => findDerivatives(d, results));
+      return results;
+    }
+
+    const derivs = findDerivatives(manifest);
+    console.log(`   Found ${derivs.length} potential derivatives`);
+
+    for (const deriv of derivs) {
+      if (deriv.urn) {
+        try {
+          const derivResp = await fetch(
+            `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest/${deriv.urn}`,
+            { headers: { 'Authorization': `Bearer ${token}` } }
+          );
+          if (derivResp.ok) {
+            const buffer = Buffer.from(await derivResp.arrayBuffer());
+            if (buffer.length > 1000) {
+              fs.writeFileSync(outputPath, buffer);
+              console.log(`✅ Derivative image saved: ${(buffer.length/1024).toFixed(0)}KB`);
+              return buffer;
+            }
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {
+    console.log(`   Derivative extraction failed: ${e.message}`);
+  }
+
+  console.log('⚠️ No thumbnail available from APS');
+  return null;
+}
+
+/**
+ * Capture screenshot with Puppeteer, with APS thumbnail fallback
+ */
+async function captureHighResScreenshotWithFallback(token, urn, outputPath) {
+  // Try Puppeteer first
+  try {
+    const screenshot = await captureHighResScreenshot(token, urn, outputPath);
+    if (screenshot && screenshot.length > 10000) {  // Ensure valid image
+      return screenshot;
+    }
+  } catch (e) {
+    console.log(`⚠️ Puppeteer screenshot failed: ${e.message}`);
+  }
+
+  // Fallback to APS Thumbnail API
+  console.log('🔄 Falling back to APS Thumbnail API...');
+  return await getAPSThumbnail(token, urn, outputPath);
+}
+
 // ===== APS+HYBRID: Render with APS, extract entities with Python =====
 /**
  * Combines APS high-quality rendering with Python entity extraction
@@ -716,7 +814,7 @@ async function renderDXFWithAPSHybrid(dxfPath, outputDir) {
     // Capture full high-res screenshot
     console.log('📸 Step 4: Capturing high-res screenshot with APS Viewer...');
     const fullScreenshotPath = path.join(outputDir, 'aps_full.png');
-    const apsImage = await captureHighResScreenshot(viewerToken, urn, fullScreenshotPath);
+    const apsImage = await captureHighResScreenshotWithFallback(viewerToken, urn, fullScreenshotPath);
 
     if (!apsImage) {
       console.log('⚠️ APS screenshot failed, using Python-rendered image');
@@ -2785,7 +2883,7 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         // Capture high-res screenshot
         screenshotId = uuidv4();
         const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
-        fullImage = await captureHighResScreenshot(viewerToken, urn, screenshotPath);
+        fullImage = await captureHighResScreenshotWithFallback(viewerToken, urn, screenshotPath);
 
         screenshotUrl = `/screenshots/${screenshotId}.png`;
         zones = await splitIntoZones(fullImage);
@@ -3184,7 +3282,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       // Capture high-res screenshot
       const screenshotId = uuidv4();
       const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
-      const fullImage = await captureHighResScreenshot(viewerToken, urn, screenshotPath);
+      const fullImage = await captureHighResScreenshotWithFallback(viewerToken, urn, screenshotPath);
 
       // Set URL for frontend
       screenshotUrl = `/screenshots/${screenshotId}.png`;
