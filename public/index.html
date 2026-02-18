@@ -576,6 +576,61 @@
     .cat-findings li.rec { color: var(--warning); }
     .cat-findings li.rec::before { content: '💡'; }
 
+    /* Object Counts Section */
+    .object-counts-section {
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), var(--bg-card));
+      border: 2px solid var(--primary);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .object-counts-section h3 {
+      color: var(--primary);
+      margin-bottom: 20px;
+      font-size: 1.2rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .object-counts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+    .object-count-item {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+    .object-count-item:hover {
+      border-color: var(--primary);
+      transform: translateY(-2px);
+    }
+    .object-count-item.has-items {
+      border-color: var(--success);
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), var(--bg-elevated));
+    }
+    .object-count-icon {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+    }
+    .object-count-number {
+      font-size: 1.8rem;
+      font-weight: 800;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .object-count-item.has-items .object-count-number {
+      color: var(--success);
+    }
+    .object-count-label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
     /* Critical Issues */
     .critical-box {
       background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), var(--bg-card));
@@ -1509,6 +1564,12 @@
         <div class="building-type" id="buildingType"></div>
       </div>
 
+      <!-- Object Counts (Hybrid Analysis) -->
+      <div class="object-counts-section" id="objectCountsSection" style="display:none">
+        <h3>🔥 ספירת אלמנטי בטיחות אש</h3>
+        <div class="object-counts-grid" id="objectCountsGrid"></div>
+      </div>
+
       <!-- Critical Issues -->
       <div class="critical-box" id="criticalBox" style="display:none">
         <h3>בעיות קריטיות</h3>
@@ -2281,7 +2342,15 @@
       const badgeWrap = document.getElementById('methodBadgeWrap');
       const badge = document.getElementById('methodBadge');
       badgeWrap.style.display = 'flex';
-      if (data.analysisMethod === 'vector') {
+
+      // Check if hybrid analysis was used
+      const isHybrid = data.metadata?.hybridAnalysis || data.rawReport?.hybridAnalysis;
+      const zonesAnalyzed = data.rawReport?.zonesAnalyzed || data.metadata?.zones || 0;
+
+      if (isHybrid) {
+        badge.className = 'method-badge vision';
+        badge.innerHTML = `🔬 ניתוח היברידי (${zonesAnalyzed} אזורים עם נתוני אלמנטים)`;
+      } else if (data.analysisMethod === 'vector') {
         badge.className = 'method-badge vector';
         badge.innerHTML = '🔷 ניתוח וקטורי (DXF)';
       } else if (data.analysisMethod === 'vision-high-res' || data.screenshotUrl) {
@@ -2420,6 +2489,44 @@
       const offset = 502 - (score / 100) * 502;
       document.getElementById('scoreCircle').style.strokeDashoffset = offset;
 
+      // Object Counts (Hybrid Analysis)
+      const objectCountsSection = document.getElementById('objectCountsSection');
+      const objectCountsGrid = document.getElementById('objectCountsGrid');
+
+      // Check for object counts in rawReport (from hybrid analysis)
+      const objectCounts = data.rawReport?.objectCounts || data.hybridData?.objectCounts || null;
+
+      if (objectCounts) {
+        objectCountsSection.style.display = 'block';
+
+        const countItems = [
+          { key: 'sprinklers', label: 'ספרינקלרים', icon: '💧' },
+          { key: 'smokeDetectors', label: 'גלאי עשן', icon: '🔔' },
+          { key: 'heatDetectors', label: 'גלאי חום', icon: '🌡️' },
+          { key: 'fireExtinguishers', label: 'מטפי כיבוי', icon: '🧯' },
+          { key: 'hydrants', label: 'הידרנטים', icon: '🔴' },
+          { key: 'fireDoors', label: 'דלתות אש', icon: '🚪' },
+          { key: 'exits', label: 'יציאות חירום', icon: '🚶' },
+          { key: 'stairs', label: 'מדרגות', icon: '🪜' },
+          { key: 'fireWalls', label: 'קירות אש', icon: '🧱' },
+          { key: 'fireHoseReels', label: 'גלגלוני כיבוי', icon: '🔥' }
+        ];
+
+        objectCountsGrid.innerHTML = countItems.map(item => {
+          const count = objectCounts[item.key] || 0;
+          const hasItems = count > 0;
+          return `
+            <div class="object-count-item ${hasItems ? 'has-items' : ''}">
+              <div class="object-count-icon">${item.icon}</div>
+              <div class="object-count-number">${count}</div>
+              <div class="object-count-label">${item.label}</div>
+            </div>
+          `;
+        }).join('');
+      } else {
+        objectCountsSection.style.display = 'none';
+      }
+
       // Critical issues
       const criticals = a.criticalIssues || [];
       const criticalBox = document.getElementById('criticalBox');
@@ -2472,6 +2579,7 @@
       document.getElementById('progressSteps').innerHTML = '';
       document.getElementById('categoriesGrid').innerHTML = '';
       document.getElementById('criticalBox').style.display = 'none';
+      document.getElementById('objectCountsSection').style.display = 'none';
       document.getElementById('imageSection').style.display = 'none';
       document.getElementById('vectorSection').style.display = 'none';
       document.getElementById('methodBadgeWrap').style.display = 'none';

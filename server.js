@@ -1372,16 +1372,19 @@ ${entitySummary || '(אין טקסט/בלוקים באזור זה)'}
 
 === משימת ניתוח ===
 ${analysisType === 'fire-safety' ? `
-בדוק את האזור עבור:
-1. ספרינקלרים - מיקום, כמות
-2. גלאי עשן - סוג וכמות
-3. דלתות אש - סימון, כיוון
-4. יציאות חירום - סימון, רוחב
-5. מטפי כיבוי - מיקום
-6. סימני אש - קירות, מדרגות
-7. קרא את הטקסטים בעברית
+ספור וזהה את כל האלמנטים הבאים באזור:
+1. ספרינקלרים (SPRINKLER) - ספור כמות, ציין מיקום כל אחד
+2. גלאי עשן (SMOKE_DETECTOR) - ספור כמות
+3. גלאי חום (HEAT_DETECTOR) - ספור כמות
+4. מטפי כיבוי (FIRE_EXTINGUISHER) - ספור כמות
+5. הידרנטים (HYDRANT) - ספור כמות
+6. דלתות אש (FIRE_DOOR) - ספור כמות, בדוק כיוון
+7. יציאות חירום (EXIT) - ספור כמות
+8. מדרגות (STAIRS) - ספור כמות
+9. קירות אש (FIRE_WALL) - זהה אם קיימים
+10. גלגלוני כיבוי (FIRE_HOSE_REEL) - ספור כמות
 
-כשאתה מדווח על ממצאים, כלול את קואורדינטות הפיקסל.
+כשאתה מדווח, כלול את קואורדינטות הפיקסל של כל אלמנט.
 ` : `
 בדוק את האזור עבור:
 1. מידות וכתות
@@ -1393,6 +1396,25 @@ ${analysisType === 'fire-safety' ? `
 החזר JSON:
 {
   "zone_id": "${zone.zone_id}",
+  "objectCounts": {
+    "sprinklers": 0,
+    "smokeDetectors": 0,
+    "heatDetectors": 0,
+    "fireExtinguishers": 0,
+    "hydrants": 0,
+    "fireDoors": 0,
+    "exits": 0,
+    "stairs": 0,
+    "fireWalls": 0,
+    "fireHoseReels": 0
+  },
+  "detectedObjects": [
+    {
+      "type": "SPRINKLER|SMOKE_DETECTOR|FIRE_EXTINGUISHER|...",
+      "pixel_pos": [x, y],
+      "confidence": 0-100
+    }
+  ],
   "findings": [
     {
       "category": "קטגוריה",
@@ -1552,13 +1574,54 @@ function pixelToWorld(pixelPos, transform) {
 function aggregateZoneResults(zoneResults, globalBounds) {
   const allFindings = [];
   const allTexts = [];
+  const allDetectedObjects = [];
   let totalScore = 0;
   let scoreCount = 0;
+
+  // Initialize total object counts
+  const totalObjectCounts = {
+    sprinklers: 0,
+    smokeDetectors: 0,
+    heatDetectors: 0,
+    fireExtinguishers: 0,
+    hydrants: 0,
+    fireDoors: 0,
+    exits: 0,
+    stairs: 0,
+    fireWalls: 0,
+    fireHoseReels: 0
+  };
 
   for (const zone of zoneResults) {
     if (!zone.analysis) continue;
 
     const analysis = zone.analysis;
+
+    // Aggregate object counts
+    if (analysis.objectCounts) {
+      for (const [key, value] of Object.entries(analysis.objectCounts)) {
+        if (totalObjectCounts.hasOwnProperty(key) && typeof value === 'number') {
+          totalObjectCounts[key] += value;
+        }
+      }
+    }
+
+    // Collect detected objects with world coordinates
+    if (analysis.detectedObjects && Array.isArray(analysis.detectedObjects)) {
+      for (const obj of analysis.detectedObjects) {
+        let worldPos = null;
+        if (obj.pixel_pos && zone.transform) {
+          worldPos = pixelToWorld(obj.pixel_pos, zone.transform);
+        }
+
+        allDetectedObjects.push({
+          ...obj,
+          zone_id: zone.zone_id,
+          grid_position: zone.grid_position,
+          world_position: worldPos
+        });
+      }
+    }
 
     // Collect findings with world coordinates
     if (analysis.findings && Array.isArray(analysis.findings)) {
@@ -1595,13 +1658,52 @@ function aggregateZoneResults(zoneResults, globalBounds) {
   // Deduplicate findings from overlapping zones
   const deduplicatedFindings = deduplicateFindings(allFindings);
 
+  // Deduplicate detected objects from overlapping zones
+  const deduplicatedObjects = deduplicateDetectedObjects(allDetectedObjects);
+
   // Calculate overall score
   const overallScore = scoreCount > 0 ? Math.round(totalScore / scoreCount) : 50;
+
+  // Recalculate counts from deduplicated objects (more accurate)
+  const recountedObjects = {
+    sprinklers: 0,
+    smokeDetectors: 0,
+    heatDetectors: 0,
+    fireExtinguishers: 0,
+    hydrants: 0,
+    fireDoors: 0,
+    exits: 0,
+    stairs: 0,
+    fireWalls: 0,
+    fireHoseReels: 0
+  };
+
+  const typeMapping = {
+    'SPRINKLER': 'sprinklers',
+    'SMOKE_DETECTOR': 'smokeDetectors',
+    'HEAT_DETECTOR': 'heatDetectors',
+    'FIRE_EXTINGUISHER': 'fireExtinguishers',
+    'HYDRANT': 'hydrants',
+    'FIRE_DOOR': 'fireDoors',
+    'EXIT': 'exits',
+    'STAIRS': 'stairs',
+    'FIRE_WALL': 'fireWalls',
+    'FIRE_HOSE_REEL': 'fireHoseReels'
+  };
+
+  for (const obj of deduplicatedObjects) {
+    const countKey = typeMapping[obj.type];
+    if (countKey && recountedObjects.hasOwnProperty(countKey)) {
+      recountedObjects[countKey]++;
+    }
+  }
 
   return {
     overallScore,
     status: overallScore >= 70 ? 'PASS' : overallScore >= 40 ? 'NEEDS_REVIEW' : 'FAIL',
     totalZonesAnalyzed: zoneResults.length,
+    objectCounts: recountedObjects,
+    detectedObjects: deduplicatedObjects,
     findings: deduplicatedFindings,
     hebrewTexts: allTexts,
     globalBounds: globalBounds
@@ -1642,6 +1744,36 @@ function deduplicateFindings(findings) {
 }
 
 /**
+ * Deduplicate detected objects from overlapping zones based on proximity
+ */
+function deduplicateDetectedObjects(objects) {
+  const deduplicated = [];
+  const proximityThreshold = 30; // pixels - tighter threshold for objects
+
+  for (const obj of objects) {
+    // Check if similar object already exists
+    const isDuplicate = deduplicated.some(existing => {
+      // Same type and similar position
+      if (existing.type !== obj.type) return false;
+
+      if (existing.pixel_pos && obj.pixel_pos) {
+        const dx = Math.abs(existing.pixel_pos[0] - obj.pixel_pos[0]);
+        const dy = Math.abs(existing.pixel_pos[1] - obj.pixel_pos[1]);
+        return dx < proximityThreshold && dy < proximityThreshold;
+      }
+
+      return false;
+    });
+
+    if (!isDuplicate) {
+      deduplicated.push(obj);
+    }
+  }
+
+  return deduplicated;
+}
+
+/**
  * Main hybrid analysis function
  */
 async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety', customPrompt = null) {
@@ -1662,7 +1794,10 @@ async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety',
   // Aggregate results
   const aggregated = aggregateZoneResults(zoneResults, hybridData.global_bounds);
 
+  // Log object counts
+  const counts = aggregated.objectCounts;
   console.log(`✅ Hybrid analysis complete: ${aggregated.findings.length} findings, score ${aggregated.overallScore}`);
+  console.log(`   Objects detected: ${counts.sprinklers} sprinklers, ${counts.smokeDetectors} smoke detectors, ${counts.fireExtinguishers} extinguishers`);
 
   // Format for fire safety output
   return {
@@ -1676,6 +1811,9 @@ async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety',
     detailedReport: generateDetailedReport(aggregated),
     hybridAnalysis: true,
     zonesAnalyzed: aggregated.totalZonesAnalyzed,
+    // NEW: Object counts and locations
+    objectCounts: aggregated.objectCounts,
+    detectedObjects: aggregated.detectedObjects,
     rawZoneResults: zoneResults
   };
 }
@@ -2604,6 +2742,25 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 
           screenshotCache.set(screenshotId, { full: fullImage, zones });
 
+          // Store hybrid zone data for response (entities with pixel coords)
+          const hybridZonesForResponse = pythonResult.hybridData.zones.map(z => ({
+            zone_id: z.zone_id,
+            image_url: `/screenshots/${screenshotId}_${z.zone_id}.jpg`,
+            image_size: z.image_size,
+            bounds: z.bounds,
+            grid_position: z.grid_position,
+            entities: z.entities,
+            entity_count: z.entity_count
+          }));
+
+          // Copy zone images to public directory for serving
+          for (const zone of pythonResult.hybridData.zones) {
+            if (fs.existsSync(zone.image_path)) {
+              const destPath = path.join(publicScreenshotsDir, `${screenshotId}_${zone.zone_id}.jpg`);
+              fs.copyFileSync(zone.image_path, destPath);
+            }
+          }
+
           analysisData = {
             method: 'DXF Hybrid Spatial Analysis (v7)',
             screenshotUrl,
@@ -2612,7 +2769,10 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
             entitiesExtracted: pythonResult.hybridData.zones.reduce((sum, z) => sum + (z.entity_count || 0), 0),
             entities: pythonResult.metadata?.total_entities || 'unknown',
             layers: pythonResult.metadata?.layer_count || 'unknown',
-            hybridAnalysis: true
+            hybridAnalysis: true,
+            // Include hybrid zone data with entities
+            hybridZones: hybridZonesForResponse,
+            globalBounds: pythonResult.hybridData.global_bounds
           };
         } else {
           // Legacy mode: standard vision analysis
@@ -2698,7 +2858,14 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       },
       // Keep raw data for debugging
       metadata: analysisData,
-      rawReport: report
+      rawReport: report,
+      // NEW: Hybrid spatial data (zones with entities and pixel coords)
+      hybridData: analysisData.hybridAnalysis ? {
+        zones: analysisData.hybridZones || [],
+        globalBounds: analysisData.globalBounds || null,
+        totalZones: analysisData.zones || 0,
+        entitiesExtracted: analysisData.entitiesExtracted || 0
+      } : null
     });
 
   } catch (error) {
