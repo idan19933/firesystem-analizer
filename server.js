@@ -362,12 +362,18 @@ async function waitForTranslation(token, urn) {
 
     if (manifest.status === 'success' || manifest.status === 'complete') {
       console.log('✅ Translation complete');
+      // Wait for manifest to be fully indexed
+      console.log('   Waiting 5s for manifest indexing...');
+      await new Promise(r => setTimeout(r, 5000));
       return manifest;
     }
 
     const svf2 = manifest.derivatives?.find(d => d.outputType === 'svf2');
     if (svf2?.status === 'success') {
       console.log('✅ SVF2 ready');
+      // Wait for manifest to be fully indexed
+      console.log('   Waiting 5s for manifest indexing...');
+      await new Promise(r => setTimeout(r, 5000));
       return manifest;
     }
 
@@ -443,7 +449,12 @@ async function captureHighResScreenshot(token, urn, outputPath) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu',
+      // Enable WebGL with software rendering for APS Viewer
+      '--enable-webgl',
+      '--use-gl=swiftshader',
+      '--enable-webgl-software-rendering',
+      '--ignore-gpu-blocklist',
+      '--disable-software-rasterizer',
       '--window-size=4096,4096'
     ]
   });
@@ -505,9 +516,9 @@ async function captureHighResScreenshot(token, urn, outputPath) {
             results.push({ node: node, type: 'geometry', name: node.data.name });
           }
 
-          // Recurse into children
-          var children = node.children();
-          if (children) {
+          // Recurse into children (handle both function and array)
+          var children = typeof node.children === 'function' ? node.children() : node.children;
+          if (children && children.length) {
             for (var i = 0; i < children.length; i++) {
               findAllViewables(children[i], results, depth + 1);
             }
