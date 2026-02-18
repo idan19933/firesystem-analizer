@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v38.0
+ * Fire Safety & Compliance Checker - Server v40.0
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -11,6 +11,13 @@
  * Splits into 9 zones + full image -> Claude Vision analysis
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Python ezdxf + matplotlib for high-quality rendering
+ *
+ * v40.0: FLATTENED DXF SUPPORT
+ *   - Batch rendering for 1M+ entities
+ *   - Auto-detect plan sections by X-coordinate gaps
+ *   - Section classification with Claude Vision
+ *   - 20-check Israeli fire safety regulation analysis
+ *   - Support for large exploded/flattened DXF files
  *
  * v38.0: HYBRID SPATIAL ANALYSIS
  *   - Split drawing into overlapping zones with entity data
@@ -63,10 +70,10 @@ if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir, { recursive: tr
 const publicScreenshotsDir = path.join(__dirname, 'public', 'screenshots');
 if (!fs.existsSync(publicScreenshotsDir)) fs.mkdirSync(publicScreenshotsDir, { recursive: true });
 
-// Multer
+// Multer - 250MB limit for large flattened DXF files
 const upload = multer({
   dest: uploadsDir,
-  limits: { fileSize: 500 * 1024 * 1024 },
+  limits: { fileSize: 250 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     if (['.dwg', '.dxf', '.dwf', '.zip'].includes(ext)) cb(null, true);
@@ -1141,13 +1148,39 @@ async function renderDXFWithPython(dxfPath, outputDir) {
     console.log(`   Overview: ${jsonResult.overview}`);
     console.log(`   Zones: ${jsonResult.zones?.length || 0}`);
 
-    // Check for hybrid data (v7+)
+    // Check for hybrid data (v7+) or sections mode (v8)
     if (jsonResult.hybrid_data) {
       console.log(`   Hybrid zones: ${jsonResult.hybrid_data.total_zones}`);
       console.log(`   Entities extracted: ${jsonResult.total_entities_extracted || 0}`);
     }
+    if (jsonResult.mode === 'sections') {
+      console.log(`   SECTION MODE: ${jsonResult.section_count} sections detected`);
+      console.log(`   Is flattened: ${jsonResult.is_flattened}`);
+    }
 
-    // Read the rendered image
+    // For sections mode, return sections data
+    if (jsonResult.mode === 'sections' && jsonResult.sections) {
+      const sections = jsonResult.sections.map(sec => ({
+        sectionId: sec.section_id,
+        imagePath: sec.image_path,
+        bounds: sec.bounds,
+        classification: null,  // To be filled by Claude
+        buffer: fs.existsSync(sec.image_path) ? fs.readFileSync(sec.image_path) : null
+      }));
+
+      return {
+        mode: 'sections',
+        isFlattened: jsonResult.is_flattened,
+        sections,
+        totalEntities: jsonResult.total_entities,
+        entityCounts: jsonResult.entity_counts,
+        layers: jsonResult.layers,
+        outputDir: outputPath,
+        version: jsonResult.version || 'v8-sections'
+      };
+    }
+
+    // Read the rendered image (hybrid mode)
     const renderedPath = jsonResult.rendered_image || path.join(outputPath, 'rendered_plan.png');
     if (fs.existsSync(renderedPath)) {
       const imageBuffer = fs.readFileSync(renderedPath);
@@ -2481,6 +2514,491 @@ function generateDetailedReport(aggregated) {
   return lines.join('\n');
 }
 
+// ===== SECTION CLASSIFICATION FOR FLATTENED DXF (v8) =====
+/**
+ * Classify plan sections using Claude Vision
+ * For flattened DXF files that have multiple plan sections side by side
+ */
+async function classifySectionsWithClaude(sections) {
+  if (!ANTHROPIC_API_KEY || sections.length === 0) {
+    return sections;
+  }
+
+  console.log(`🔬 Classifying ${sections.length} sections with Claude Vision...`);
+
+  const classifiedSections = [];
+
+  for (const section of sections) {
+    if (!section.buffer) {
+      classifiedSections.push({ ...section, classification: 'unknown' });
+      continue;
+    }
+
+    try {
+      const base64 = section.buffer.toString('base64');
+      const mediaType = 'image/png';
+
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 500,
+          messages: [{
+            role: 'user',
+            content: [
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: mediaType, data: base64 }
+              },
+              {
+                type: 'text',
+                text: `סווג את סוג התכנית הזו. החזר JSON בלבד:
+{
+  "type": "floor_plan|section|elevation|site_plan|fire_system|sprinkler|details|other",
+  "floor": "קומה (אם רלוונטי): קרקע/ראשונה/שנייה/גג/מרתף/לא רלוונטי",
+  "relevance_to_fire": "high|medium|low",
+  "hebrew_label": "תיאור קצר בעברית"
+}`
+              }
+            ]
+          }]
+        })
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        const content = data.content[0].text;
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const classification = JSON.parse(jsonMatch[0]);
+          classifiedSections.push({ ...section, classification });
+          console.log(`   Section ${section.sectionId}: ${classification.type} (${classification.relevance_to_fire})`);
+        } else {
+          classifiedSections.push({ ...section, classification: { type: 'unknown' } });
+        }
+      } else {
+        classifiedSections.push({ ...section, classification: { type: 'unknown' } });
+      }
+    } catch (err) {
+      console.log(`   Section ${section.sectionId} classification error: ${err.message}`);
+      classifiedSections.push({ ...section, classification: { type: 'unknown' } });
+    }
+  }
+
+  return classifiedSections;
+}
+
+// ===== 20-CHECK ISRAELI FIRE SAFETY REGULATIONS =====
+const FIRE_SAFETY_REGULATIONS = [
+  {
+    id: 'REG-001',
+    category: 'ספרינקלרים',
+    name: 'מרחק ספרינקלרים',
+    description: 'מרחק מקסימלי בין ספרינקלרים 4.6 מטר (לפי ת"י 1596)',
+    checkType: 'visual_measurement',
+    standard: 'ת"י 1596'
+  },
+  {
+    id: 'REG-002',
+    category: 'ספרינקלרים',
+    name: 'כיסוי ספרינקלרים',
+    description: 'כל שטח הבניין מכוסה על ידי ספרינקלרים',
+    checkType: 'coverage_check',
+    standard: 'ת"י 1596'
+  },
+  {
+    id: 'REG-003',
+    category: 'יציאות חירום',
+    name: 'רוחב יציאות',
+    description: 'רוחב מינימלי של יציאת חירום 90 ס"מ (דלת בודדת)',
+    checkType: 'visual_measurement',
+    standard: 'תקנות התכנון והבנייה'
+  },
+  {
+    id: 'REG-004',
+    category: 'יציאות חירום',
+    name: 'מספר יציאות',
+    description: 'שתי יציאות חירום לפחות לכל קומה',
+    checkType: 'count_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-005',
+    category: 'יציאות חירום',
+    name: 'מרחק מקסימלי',
+    description: 'מרחק מקסימלי 40 מטר לקצה מבוי סתום',
+    checkType: 'visual_measurement',
+    standard: 'תקנות התכנון והבנייה'
+  },
+  {
+    id: 'REG-006',
+    category: 'מדרגות',
+    name: 'מדרגות מוגנות',
+    description: 'חדר מדרגות מוגן עם עמידות אש 2 שעות',
+    checkType: 'marking_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-007',
+    category: 'מדרגות',
+    name: 'רוחב מדרגות',
+    description: 'רוחב מינימלי של מדרגות 110 ס"מ',
+    checkType: 'visual_measurement',
+    standard: 'תקנות התכנון והבנייה'
+  },
+  {
+    id: 'REG-008',
+    category: 'דלתות אש',
+    name: 'דירוג דלתות אש',
+    description: 'דלתות אש עם דירוג מתאים (30/60/120 דקות)',
+    checkType: 'marking_check',
+    standard: 'ת"י 1220'
+  },
+  {
+    id: 'REG-009',
+    category: 'דלתות אש',
+    name: 'כיוון פתיחה',
+    description: 'דלתות אש נפתחות בכיוון המילוט',
+    checkType: 'visual_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-010',
+    category: 'גלאי עשן',
+    name: 'מיקום גלאים',
+    description: 'גלאי עשן בכל חדר ובמסדרונות',
+    checkType: 'coverage_check',
+    standard: 'ת"י 1220'
+  },
+  {
+    id: 'REG-011',
+    category: 'מטפי כיבוי',
+    name: 'מרחק למטף',
+    description: 'מטף כיבוי במרחק מקסימלי 25 מטר מכל נקודה',
+    checkType: 'visual_measurement',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-012',
+    category: 'מטפי כיבוי',
+    name: 'סוג מטף',
+    description: 'מטף מתאים לסוג הסיכון (A/B/C/D)',
+    checkType: 'marking_check',
+    standard: 'ת"י 129'
+  },
+  {
+    id: 'REG-013',
+    category: 'הידרנטים',
+    name: 'מיקום הידרנטים',
+    description: 'הידרנט פנימי בכל קומה ליד חדר מדרגות',
+    checkType: 'location_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-014',
+    category: 'תאורת חירום',
+    name: 'שילוט יציאה',
+    description: 'שילוט מואר ליציאות חירום',
+    checkType: 'visual_check',
+    standard: 'ת"י 1220'
+  },
+  {
+    id: 'REG-015',
+    category: 'הפרדות אש',
+    name: 'קירות אש',
+    description: 'קירות אש בין יחידות/אגפים עם עמידות מתאימה',
+    checkType: 'marking_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-016',
+    category: 'הפרדות אש',
+    name: 'תקרות אש',
+    description: 'תקרה עם עמידות אש מתאימה',
+    checkType: 'marking_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-017',
+    category: 'מעליות',
+    name: 'מעלית כבאים',
+    description: 'מעלית כבאים בבניין מעל 4 קומות',
+    checkType: 'presence_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-018',
+    category: 'אוורור',
+    name: 'אוורור חדר מדרגות',
+    description: 'פתח אוורור או מערכת שאיבת עשן בחדר מדרגות',
+    checkType: 'visual_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-019',
+    category: 'גישה',
+    name: 'גישה לרכב כיבוי',
+    description: 'גישה לרכב כיבוי אש למבנה',
+    checkType: 'site_check',
+    standard: 'הנ"כ 536'
+  },
+  {
+    id: 'REG-020',
+    category: 'מערכות',
+    name: 'לוח כיבוי אש',
+    description: 'לוח בקרה למערכת גילוי אש במיקום נגיש',
+    checkType: 'presence_check',
+    standard: 'ת"י 1220'
+  }
+];
+
+/**
+ * Run 20-check fire safety regulation analysis on classified sections
+ */
+async function runRegulationChecks(classifiedSections, additionalContext = {}) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY not configured');
+  }
+
+  console.log(`📋 Running 20-check fire safety regulation analysis...`);
+
+  // Find relevant sections for fire safety analysis
+  const relevantSections = classifiedSections.filter(s =>
+    s.classification?.relevance_to_fire === 'high' ||
+    s.classification?.type === 'floor_plan' ||
+    s.classification?.type === 'fire_system' ||
+    s.classification?.type === 'sprinkler'
+  );
+
+  if (relevantSections.length === 0) {
+    console.log('⚠️ No relevant sections found, using all sections');
+    relevantSections.push(...classifiedSections.slice(0, 3)); // Use first 3
+  }
+
+  console.log(`   Analyzing ${relevantSections.length} relevant sections...`);
+
+  // Build regulation checklist text
+  const regulationList = FIRE_SAFETY_REGULATIONS.map(r =>
+    `${r.id}: ${r.name} - ${r.description} (${r.standard})`
+  ).join('\n');
+
+  // Analyze relevant sections
+  const imageContents = [];
+  for (const section of relevantSections.slice(0, 4)) { // Max 4 sections
+    if (section.buffer) {
+      imageContents.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/png',
+          data: section.buffer.toString('base64')
+        }
+      });
+    }
+  }
+
+  const prompt = `אתה מומחה בטיחות אש ישראלי. בדוק את התכניות הבאות מול 20 התקנות הישראליות:
+
+=== רשימת תקנות לבדיקה ===
+${regulationList}
+
+=== הוראות ===
+לכל תקנה מהרשימה, קבע:
+- status: "pass" (עובר), "fail" (נכשל), "needs_review" (דורש בדיקה), "not_visible" (לא נראה בתכנית)
+- finding: מה מצאת בתכנית
+- confidence: רמת ביטחון 0-100
+- location: איפה בתכנית (אם רלוונטי)
+
+החזר JSON בפורמט:
+{
+  "overallScore": 0-100,
+  "status": "PASS|FAIL|NEEDS_REVIEW",
+  "regulationResults": [
+    {
+      "regulationId": "REG-001",
+      "name": "מרחק ספרינקלרים",
+      "status": "pass|fail|needs_review|not_visible",
+      "finding": "מה נמצא",
+      "confidence": 85,
+      "location": "איפה"
+    }
+  ],
+  "summary": "סיכום כללי בעברית",
+  "criticalIssues": ["בעיות קריטיות"],
+  "recommendations": ["המלצות"]
+}`;
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 8000,
+        messages: [{
+          role: 'user',
+          content: [
+            ...imageContents,
+            { type: 'text', text: prompt }
+          ]
+        }]
+      })
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Claude API error: ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    const content = data.content[0].text;
+
+    // Parse JSON response
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      console.log(`✅ Regulation check complete: ${result.overallScore}/100`);
+
+      // Count results
+      const counts = {
+        pass: 0, fail: 0, needsReview: 0, notVisible: 0
+      };
+      for (const r of result.regulationResults || []) {
+        if (r.status === 'pass') counts.pass++;
+        else if (r.status === 'fail') counts.fail++;
+        else if (r.status === 'needs_review') counts.needsReview++;
+        else counts.notVisible++;
+      }
+      console.log(`   Results: ${counts.pass} pass, ${counts.fail} fail, ${counts.needsReview} review, ${counts.notVisible} not visible`);
+
+      return result;
+    }
+
+    return { overallScore: 0, status: 'NEEDS_REVIEW', regulationResults: [], summary: 'לא הצלחנו לנתח את התכנית' };
+  } catch (err) {
+    console.log(`⚠️ Regulation check error: ${err.message}`);
+    return { overallScore: 0, status: 'NEEDS_REVIEW', regulationResults: [], summary: `שגיאה: ${err.message}` };
+  }
+}
+
+/**
+ * Complete flattened DXF pipeline
+ * 1. Python renders sections
+ * 2. Claude classifies each section
+ * 3. Claude runs 20-check regulation analysis on relevant sections
+ */
+async function analyzeFlattenedDXF(pythonResult, customPrompt = null) {
+  console.log('🔄 Processing flattened DXF with section detection...');
+
+  // Step 1: Classify sections
+  const classifiedSections = await classifySectionsWithClaude(pythonResult.sections);
+
+  // Log section summary
+  const sectionTypes = {};
+  for (const sec of classifiedSections) {
+    const type = sec.classification?.type || 'unknown';
+    sectionTypes[type] = (sectionTypes[type] || 0) + 1;
+  }
+  console.log('   Section types:', sectionTypes);
+
+  // Step 2: Run 20-check regulation analysis
+  const regulationResult = await runRegulationChecks(classifiedSections, {
+    totalEntities: pythonResult.totalEntities,
+    layers: pythonResult.layers
+  });
+
+  // Build final report
+  const report = {
+    overallScore: regulationResult.overallScore,
+    status: regulationResult.status,
+    summary: regulationResult.summary,
+    categories: buildCategoriesFromRegulations(regulationResult.regulationResults),
+    criticalIssues: regulationResult.criticalIssues || [],
+    positiveFindings: (regulationResult.regulationResults || [])
+      .filter(r => r.status === 'pass')
+      .map(r => `${r.name}: ${r.finding}`),
+    hebrewTexts: [],
+    detailedReport: regulationResult.summary,
+    regulationResults: regulationResult.regulationResults,
+    recommendations: regulationResult.recommendations || [],
+    // Flattened-specific data
+    isFlattened: true,
+    sectionCount: classifiedSections.length,
+    sectionTypes,
+    sections: classifiedSections.map(s => ({
+      sectionId: s.sectionId,
+      classification: s.classification,
+      bounds: s.bounds
+    }))
+  };
+
+  return report;
+}
+
+/**
+ * Build categories array from regulation results
+ */
+function buildCategoriesFromRegulations(regulationResults) {
+  const categories = {};
+
+  for (const reg of FIRE_SAFETY_REGULATIONS) {
+    if (!categories[reg.category]) {
+      categories[reg.category] = {
+        name: reg.category,
+        regulations: [],
+        pass: 0,
+        fail: 0,
+        needsReview: 0,
+        notVisible: 0
+      };
+    }
+    categories[reg.category].regulations.push(reg);
+  }
+
+  // Match results to categories
+  for (const result of regulationResults || []) {
+    const reg = FIRE_SAFETY_REGULATIONS.find(r => r.id === result.regulationId);
+    if (reg && categories[reg.category]) {
+      if (result.status === 'pass') categories[reg.category].pass++;
+      else if (result.status === 'fail') categories[reg.category].fail++;
+      else if (result.status === 'needs_review') categories[reg.category].needsReview++;
+      else categories[reg.category].notVisible++;
+    }
+  }
+
+  // Build output array
+  return Object.values(categories).map(cat => {
+    const total = cat.regulations.length;
+    const checked = cat.pass + cat.fail + cat.needsReview;
+    const score = checked > 0 ? Math.round((cat.pass / checked) * 100) : 0;
+
+    let status = 'NEEDS_REVIEW';
+    if (cat.fail > 0) status = 'FAIL';
+    else if (cat.pass > 0 && cat.fail === 0 && cat.needsReview === 0) status = 'PASS';
+
+    return {
+      name: cat.name,
+      score,
+      status,
+      count: `${cat.pass}/${total} תקנות עוברות`,
+      findings: (regulationResults || [])
+        .filter(r => FIRE_SAFETY_REGULATIONS.find(reg => reg.id === r.regulationId)?.category === cat.name)
+        .map(r => r.finding),
+      recommendations: (regulationResults || [])
+        .filter(r => FIRE_SAFETY_REGULATIONS.find(reg => reg.id === r.regulationId)?.category === cat.name && r.status === 'fail')
+        .map(r => `${r.name}: נדרש תיקון`)
+    };
+  });
+}
+
 // ===== EXTRACT FROM ZIP =====
 function extractFromZip(filePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
@@ -3246,7 +3764,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     console.log('\n========================================');
-    console.log('🔥 FIRE SAFETY ANALYSIS v35 (Vision)');
+    console.log('🔥 FIRE SAFETY ANALYSIS v40 (Vision + Flattened DXF)');
     console.log(`📁 ${req.file.originalname} (${(req.file.size / 1024 / 1024).toFixed(1)}MB)`);
     console.log('========================================\n');
 
@@ -3322,12 +3840,55 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       }
 
       // Fallback to Python-only rendering
-      if (!pythonResult || !pythonResult.buffer) {
+      if (!pythonResult || (!pythonResult.buffer && !pythonResult.mode)) {
         console.log('📐 Using DXF parsing pipeline with Python rendering');
         pythonResult = await renderDXFWithPython(filePath, outputDir);
       }
 
-      if (pythonResult && pythonResult.buffer) {
+      // ===== FLATTENED DXF: Sections Mode (v8) =====
+      if (pythonResult && pythonResult.mode === 'sections') {
+        console.log(`🔬 FLATTENED DXF detected - using section analysis mode`);
+        console.log(`   ${pythonResult.sections.length} sections, ${pythonResult.totalEntities} entities`);
+
+        // Use the flattened DXF pipeline
+        report = await analyzeFlattenedDXF(pythonResult, customPrompt);
+
+        // Save first section image as main screenshot
+        const screenshotId = uuidv4();
+        if (pythonResult.sections.length > 0 && pythonResult.sections[0].buffer) {
+          const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+          fs.writeFileSync(screenshotPath, pythonResult.sections[0].buffer);
+          screenshotUrl = `/screenshots/${screenshotId}.png`;
+
+          // Save all section images
+          for (let i = 0; i < pythonResult.sections.length; i++) {
+            const sec = pythonResult.sections[i];
+            if (sec.buffer) {
+              const secPath = path.join(publicScreenshotsDir, `${screenshotId}_section_${i}.png`);
+              fs.writeFileSync(secPath, sec.buffer);
+            }
+          }
+        }
+
+        analysisData = {
+          method: 'Flattened DXF Section Analysis (v8)',
+          screenshotUrl,
+          isFlattened: true,
+          sectionCount: pythonResult.sections.length,
+          entities: pythonResult.totalEntities,
+          regulationChecks: 20,
+          hybridAnalysis: false,
+          sections: report.sections || []
+        };
+
+        // Cleanup
+        if (pythonResult.outputDir) {
+          try { fs.rmSync(pythonResult.outputDir, { recursive: true, force: true }); } catch (e) {}
+        }
+      }
+
+      // ===== STANDARD DXF: Hybrid or Legacy Mode =====
+      else if (pythonResult && pythonResult.buffer) {
         console.log('✅ Using Python-rendered image for Vision analysis');
         const screenshotId = uuidv4();
         const screenshotPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
@@ -3496,7 +4057,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n========================================');
-  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v37.10');
+  console.log('🏛️ FIRE SAFETY & COMPLIANCE CHECKER v40.0');
   console.log('========================================');
   console.log(`🚀 Port: ${PORT}`);
   console.log(`📸 Puppeteer: ${puppeteer ? '✅ ready' : '❌ not installed'}`);
@@ -3507,6 +4068,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('🔥 Fire Safety Mode: DWG → APS Vision Analysis');
   console.log('📋 Compliance Mode: Reference Docs → Requirements → Plan Check');
   console.log('🐍 DXF Support: Python ezdxf + matplotlib (high quality)');
+  console.log('📐 Flattened DXF: Batch render + Section detection + 20-check analysis');
   console.log('========================================\n');
 });
 

@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
 DXF Fire Safety Analyzer - Python Pipeline
-Renders DXF to high-res image using ezdxf + matplotlib, then outputs for Claude Vision analysis.
+
+v8: FLATTENED DXF + BATCH RENDERING + AUTO-SECTION DETECTION
+    - Detects flattened DXF files (no blocks/text/layers)
+    - Uses batch rendering with None-separated arrays for 1M+ entities
+    - Auto-detects plan sections by X-coordinate histogram gaps
+    - Outputs sections as separate images for classification
 
 v7: HYBRID SPATIAL ANALYSIS
     - Splits drawing into overlapping zones
     - Extracts TEXT/MTEXT/INSERT entities with pixel coordinates per zone
     - Outputs hybrid JSON: zone images + entity data for context-aware AI analysis
-    - CoordinateTransformer maps DXF world coords to PNG pixel coords
 
 v6: SMART BOUNDS - Percentile-based bounds exclude outlier points
-    - Outliers (title block xrefs, north arrows) don't destroy view
-    - Uses 2nd/98th percentile + IQR fallback for concentrated content
-    - NEVER uses autoscale_view (single outlier makes drawing invisible)
 
 Usage:
     python analyze_dxf.py input.dxf --output /tmp/output_dir --json
+    python analyze_dxf.py input.dxf --output /tmp/output_dir --json --sections
 """
 
 import os
@@ -45,6 +47,7 @@ try:
     matplotlib.use('Agg')  # Headless rendering
     import matplotlib.pyplot as plt
     from matplotlib.patches import Arc
+    from matplotlib.collections import LineCollection, PatchCollection
 except ImportError:
     log("ERROR: matplotlib not installed. Run: pip install matplotlib")
     sys.exit(1)
@@ -176,11 +179,11 @@ def calculate_smart_bounds(all_x, all_y, margin=0.1):
     ax = np.array(all_x)
     ay = np.array(all_y)
 
-    # Use 2nd and 98th percentile to exclude extreme outliers
-    xmin = np.percentile(ax, 2)
-    xmax = np.percentile(ax, 98)
-    ymin = np.percentile(ay, 2)
-    ymax = np.percentile(ay, 98)
+    # Use 1st and 99th percentile to exclude extreme outliers
+    xmin = np.percentile(ax, 1)
+    xmax = np.percentile(ax, 99)
+    ymin = np.percentile(ay, 1)
+    ymax = np.percentile(ay, 99)
 
     # Add margin
     xspan = xmax - xmin
@@ -254,6 +257,386 @@ def collect_all_points(msp):
             collect(e)
 
     return all_x, all_y
+
+
+def detect_flattened_dxf(msp, entity_counts, layers):
+    """
+    Detect if DXF is flattened (exploded, no semantic content).
+    Returns True if file appears to be flattened.
+    """
+    total = sum(entity_counts.values())
+
+    # Flattened indicators:
+    # 1. No INSERT (blocks) or very few
+    insert_count = entity_counts.get('INSERT', 0)
+    insert_ratio = insert_count / total if total > 0 else 0
+
+    # 2. No TEXT/MTEXT or very few
+    text_count = entity_counts.get('TEXT', 0) + entity_counts.get('MTEXT', 0)
+    text_ratio = text_count / total if total > 0 else 0
+
+    # 3. Dominated by LINE/LWPOLYLINE/ARC (90%+)
+    geometry_types = ['LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE', 'SPLINE']
+    geometry_count = sum(entity_counts.get(t, 0) for t in geometry_types)
+    geometry_ratio = geometry_count / total if total > 0 else 0
+
+    # 4. Single layer "0" only
+    meaningful_layers = [l for l in layers if l not in ('0', 'Defpoints', 'DEFPOINTS')]
+
+    # 5. Very large entity count (100k+)
+    is_large = total > 100000
+
+    # Decision logic
+    is_flattened = (
+        insert_ratio < 0.01 and  # Less than 1% blocks
+        text_ratio < 0.001 and   # Less than 0.1% text
+        geometry_ratio > 0.95 and  # Over 95% geometry
+        len(meaningful_layers) < 5  # Few meaningful layers
+    )
+
+    log(f"   Flattened check: INSERT={insert_ratio:.1%}, TEXT={text_ratio:.1%}, GEOMETRY={geometry_ratio:.1%}, layers={len(meaningful_layers)}")
+    log(f"   Detected as: {'FLATTENED' if is_flattened else 'NORMAL'} ({'large' if is_large else 'standard'} file)")
+
+    return is_flattened
+
+
+def detect_sections_by_x_histogram(all_x, min_gap_ratio=0.1, min_points_per_section=1000):
+    """
+    Detect plan sections by finding gaps in X-coordinate histogram.
+
+    Args:
+        all_x: List of all X coordinates
+        min_gap_ratio: Minimum gap size as ratio of total width
+        min_points_per_section: Minimum points required for a valid section
+
+    Returns:
+        List of section bounds: [(xmin1, xmax1), (xmin2, xmax2), ...]
+    """
+    if len(all_x) < min_points_per_section:
+        return []
+
+    ax = np.array(all_x)
+
+    # Create histogram with 200 bins
+    num_bins = 200
+    hist, bin_edges = np.histogram(ax, bins=num_bins)
+    bin_width = bin_edges[1] - bin_edges[0]
+
+    total_width = ax.max() - ax.min()
+    min_gap_bins = int(min_gap_ratio * num_bins)
+
+    log(f"   X-histogram: {num_bins} bins, width={bin_width:.1f}, total_span={total_width:.1f}")
+
+    # Find empty/sparse regions (gaps)
+    threshold = np.percentile(hist[hist > 0], 5) if len(hist[hist > 0]) > 0 else 1
+
+    # Detect continuous sections
+    sections = []
+    in_section = False
+    section_start = None
+    gap_count = 0
+
+    for i, count in enumerate(hist):
+        if count > threshold:
+            if not in_section:
+                # Start new section
+                section_start = bin_edges[i]
+                in_section = True
+                gap_count = 0
+            else:
+                gap_count = 0
+        else:
+            if in_section:
+                gap_count += 1
+                if gap_count >= min_gap_bins:
+                    # End section
+                    section_end = bin_edges[i - gap_count + 1]
+                    sections.append((section_start, section_end))
+                    in_section = False
+
+    # Handle last section
+    if in_section:
+        sections.append((section_start, bin_edges[-1]))
+
+    # Filter sections by minimum content
+    valid_sections = []
+    for xmin, xmax in sections:
+        points_in_section = np.sum((ax >= xmin) & (ax <= xmax))
+        if points_in_section >= min_points_per_section:
+            valid_sections.append((xmin, xmax))
+            log(f"   Section: X[{xmin:.0f}, {xmax:.0f}] - {points_in_section:,} points")
+        else:
+            log(f"   Skipped small section: X[{xmin:.0f}, {xmax:.0f}] - {points_in_section} points")
+
+    log(f"   Detected {len(valid_sections)} sections from X-histogram")
+
+    return valid_sections
+
+
+def collect_geometry_batch(msp, bounds=None):
+    """
+    Collect all geometry into batch arrays using None-separators.
+    This is CRITICAL for performance with 1M+ entities.
+
+    Returns:
+        dict with 'lines', 'circles', 'arcs' arrays ready for batch plotting
+    """
+    lines_x, lines_y = [], []
+    circles = []  # List of (cx, cy, r)
+    arcs = []     # List of (cx, cy, r, start_angle, end_angle)
+
+    xmin, xmax, ymin, ymax = bounds if bounds else (-float('inf'), float('inf'), -float('inf'), float('inf'))
+
+    def in_bounds(x, y):
+        return xmin <= x <= xmax and ymin <= y <= ymax
+
+    def add_line(x1, y1, x2, y2):
+        if bounds is None or (in_bounds(x1, y1) or in_bounds(x2, y2)):
+            lines_x.extend([x1, x2, None])
+            lines_y.extend([y1, y2, None])
+
+    def process_entity(e):
+        try:
+            etype = e.dxftype()
+
+            if etype == 'LINE':
+                add_line(e.dxf.start.x, e.dxf.start.y, e.dxf.end.x, e.dxf.end.y)
+
+            elif etype == 'LWPOLYLINE':
+                pts = list(e.get_points(format='xy'))
+                if len(pts) >= 2:
+                    for i in range(len(pts) - 1):
+                        add_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+                    if e.closed and len(pts) >= 2:
+                        add_line(pts[-1][0], pts[-1][1], pts[0][0], pts[0][1])
+
+            elif etype == 'POLYLINE':
+                try:
+                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+                    if len(pts) >= 2:
+                        for i in range(len(pts) - 1):
+                            add_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+                except:
+                    pass
+
+            elif etype == 'CIRCLE':
+                cx, cy = e.dxf.center.x, e.dxf.center.y
+                if bounds is None or in_bounds(cx, cy):
+                    circles.append((cx, cy, e.dxf.radius))
+
+            elif etype == 'ARC':
+                cx, cy = e.dxf.center.x, e.dxf.center.y
+                if bounds is None or in_bounds(cx, cy):
+                    arcs.append((cx, cy, e.dxf.radius, e.dxf.start_angle, e.dxf.end_angle))
+
+            elif etype == 'SPLINE':
+                try:
+                    pts = list(e.control_points)
+                    if len(pts) >= 2:
+                        for i in range(len(pts) - 1):
+                            add_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1])
+                except:
+                    pass
+
+        except Exception:
+            pass
+
+    # Process all entities
+    for entity in msp:
+        if entity.dxftype() == 'INSERT':
+            try:
+                for ve in entity.virtual_entities():
+                    if ve.dxftype() == 'INSERT':
+                        try:
+                            for nested in ve.virtual_entities():
+                                process_entity(nested)
+                        except:
+                            pass
+                    else:
+                        process_entity(ve)
+            except:
+                pass
+        elif entity.dxftype() not in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'):
+            process_entity(entity)
+
+    return {
+        'lines_x': lines_x,
+        'lines_y': lines_y,
+        'circles': circles,
+        'arcs': arcs,
+        'line_count': lines_x.count(None),
+        'circle_count': len(circles),
+        'arc_count': len(arcs)
+    }
+
+
+def render_batch_to_image(geometry, bounds, output_path, dpi=150, linewidth=0.3):
+    """
+    Render collected geometry using batch plotting.
+    This is 10-100x faster than individual plot() calls.
+    """
+    xmin, xmax, ymin, ymax = bounds
+
+    # Calculate figure size maintaining aspect ratio
+    span_x = xmax - xmin
+    span_y = ymax - ymin
+    aspect = span_x / span_y if span_y > 0 else 1
+
+    fig_h = 40
+    fig_w = fig_h * aspect
+    fig_w = min(max(fig_w, 20), 80)
+
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+    ax.set_facecolor('white')
+    ax.set_aspect('equal')
+    ax.axis('off')
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    # Batch plot lines using single plot() with None separators
+    if geometry['lines_x']:
+        ax.plot(geometry['lines_x'], geometry['lines_y'],
+                color='#000000', linewidth=linewidth, solid_capstyle='round')
+
+    # Batch circles using PatchCollection
+    if geometry['circles']:
+        from matplotlib.patches import Circle
+        circle_patches = [Circle((cx, cy), r, fill=False, linewidth=linewidth)
+                          for cx, cy, r in geometry['circles']]
+        pc = PatchCollection(circle_patches, match_original=False,
+                            facecolors='none', edgecolors='#000000', linewidths=linewidth)
+        ax.add_collection(pc)
+
+    # Batch arcs
+    if geometry['arcs']:
+        arc_patches = [Arc((cx, cy), 2*r, 2*r, angle=0, theta1=sa, theta2=ea, linewidth=linewidth)
+                       for cx, cy, r, sa, ea in geometry['arcs']]
+        ac = PatchCollection(arc_patches, match_original=False,
+                            facecolors='none', edgecolors='#000000', linewidths=linewidth)
+        ax.add_collection(ac)
+
+    # Save
+    fig.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white', pad_inches=0.3)
+    plt.close(fig)
+
+    log(f"   Batch rendered: {geometry['line_count']} lines, {geometry['circle_count']} circles, {geometry['arc_count']} arcs")
+
+    return output_path
+
+
+def render_section(msp, section_bounds, y_bounds, output_path, dpi=150):
+    """
+    Render a single section of the DXF using batch rendering.
+
+    Args:
+        msp: Modelspace
+        section_bounds: (xmin, xmax) for this section
+        y_bounds: (ymin, ymax) global Y bounds
+        output_path: Where to save the image
+        dpi: Render DPI
+    """
+    xmin, xmax = section_bounds
+    ymin, ymax = y_bounds
+
+    # Add small margin
+    margin = 0.02
+    xpad = (xmax - xmin) * margin
+    ypad = (ymax - ymin) * margin
+
+    bounds = (xmin - xpad, xmax + xpad, ymin - ypad, ymax + ypad)
+
+    log(f"   Rendering section X[{xmin:.0f}, {xmax:.0f}]...")
+
+    # Collect geometry within bounds
+    geometry = collect_geometry_batch(msp, bounds)
+
+    # Render to image
+    render_batch_to_image(geometry, bounds, output_path, dpi=dpi)
+
+    return bounds
+
+
+def render_dxf_sections(dxf_path, output_dir, dpi=150):
+    """
+    Render DXF with auto-section detection for flattened files.
+
+    Returns:
+        dict with sections data
+    """
+    log(f"   Using SECTION DETECTION renderer v8...")
+
+    doc = read_dxf_safe(dxf_path)
+    msp = doc.modelspace()
+
+    # Count entities
+    msp_list = list(msp)
+    type_counts = {}
+    for e in msp_list:
+        t = e.dxftype()
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    total_entities = len(msp_list)
+    log(f"   Modelspace: {total_entities:,} entities")
+    log(f"   Types: {dict(sorted(type_counts.items(), key=lambda x: -x[1])[:8])}")
+
+    # Collect all points
+    log("   Collecting geometry points...")
+    all_x, all_y = collect_all_points(msp)
+    log(f"   Total points collected: {len(all_x):,}")
+
+    if len(all_x) == 0:
+        log("   ERROR: No geometry points found!")
+        return None
+
+    # Calculate global Y bounds
+    ay = np.array(all_y)
+    ymin = np.percentile(ay, 1)
+    ymax = np.percentile(ay, 99)
+    ypad = (ymax - ymin) * 0.1
+    y_bounds = (ymin - ypad, ymax + ypad)
+
+    # Detect sections
+    sections = detect_sections_by_x_histogram(all_x)
+
+    if len(sections) == 0:
+        # Fall back to single full render
+        log("   No sections detected, rendering full drawing...")
+        ax = np.array(all_x)
+        sections = [(np.percentile(ax, 1), np.percentile(ax, 99))]
+
+    # Render each section
+    section_results = []
+
+    for i, (sec_xmin, sec_xmax) in enumerate(sections):
+        section_path = os.path.join(output_dir, f'section_{i}.png')
+
+        bounds = render_section(msp, (sec_xmin, sec_xmax), y_bounds, section_path, dpi=dpi)
+
+        # Ensure max size
+        ensure_max_size(section_path, max_dim=7000)
+
+        section_results.append({
+            'section_id': i,
+            'image_path': section_path,
+            'bounds': {
+                'xmin': bounds[0],
+                'xmax': bounds[1],
+                'ymin': bounds[2],
+                'ymax': bounds[3]
+            },
+            'classification': None  # To be filled by Claude
+        })
+
+        log(f"   Section {i}: saved to {section_path}")
+
+    return {
+        'success': True,
+        'version': 'v8-sections',
+        'total_entities': total_entities,
+        'sections': section_results,
+        'y_bounds': y_bounds,
+        'entity_counts': type_counts
+    }
 
 
 def extract_zone_entities(msp, zone_bounds, transformer):
@@ -349,14 +732,12 @@ def calculate_zones_with_overlap(bounds, num_zones=10, overlap_percent=0.05):
     return zones
 
 
-def render_dxf(dxf_path, output_path, dpi=150):
+def render_dxf_standard(dxf_path, output_path, dpi=150):
     """
-    Render DXF to PNG with SMART BOUNDS.
-    - Collects all coordinates including expanded blocks
-    - Uses percentile-based bounds to exclude outliers
-    - NEVER uses autoscale (outliers would make drawing invisible)
+    Standard DXF render using batch plotting for performance.
+    Used for normal DXF files (not flattened).
     """
-    log(f"   Using SMART BOUNDS renderer v6...")
+    log(f"   Using BATCH RENDER v8...")
 
     doc = read_dxf_safe(dxf_path)
     msp = doc.modelspace()
@@ -368,235 +749,39 @@ def render_dxf(dxf_path, output_path, dpi=150):
         t = e.dxftype()
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    log(f"   Modelspace: {len(msp_list)} entities")
+    log(f"   Modelspace: {len(msp_list):,} entities")
     log(f"   Types: {dict(sorted(type_counts.items(), key=lambda x: -x[1])[:8])}")
 
-    # Step 1: Collect all points to calculate smart bounds
+    # Collect all points
     log("   Collecting geometry points...")
     all_x, all_y = collect_all_points(msp)
-    log(f"   Total points collected: {len(all_x)}")
+    log(f"   Total points collected: {len(all_x):,}")
 
     if len(all_x) == 0:
         log("   ERROR: No geometry points found!")
-        # Fall back to document extents
         try:
             extmin = doc.header.get('$EXTMIN', (0, 0, 0))
             extmax = doc.header.get('$EXTMAX', (100, 100, 0))
-            xmin, xmax = float(extmin[0]), float(extmax[0])
-            ymin, ymax = float(extmin[1]), float(extmax[1])
-            log(f"   Using document extents: X[{xmin:.1f}, {xmax:.1f}] Y[{ymin:.1f}, {ymax:.1f}]")
+            bounds = (float(extmin[0]), float(extmax[0]), float(extmin[1]), float(extmax[1]))
         except:
-            xmin, xmax, ymin, ymax = 0, 100, 0, 100
+            bounds = (0, 100, 0, 100)
     else:
-        # Log full range vs percentile range
-        full_xmin, full_xmax = min(all_x), max(all_x)
-        full_ymin, full_ymax = min(all_y), max(all_y)
-        log(f"   Full range: X[{full_xmin:.1f}, {full_xmax:.1f}] Y[{full_ymin:.1f}, {full_ymax:.1f}]")
-        log(f"   Full span: {full_xmax - full_xmin:.1f} x {full_ymax - full_ymin:.1f}")
+        bounds = calculate_smart_bounds(all_x, all_y)
 
-        xmin, xmax, ymin, ymax = calculate_smart_bounds(all_x, all_y)
+    log(f"   Smart bounds: X[{bounds[0]:.1f}, {bounds[1]:.1f}] Y[{bounds[2]:.1f}, {bounds[3]:.1f}]")
 
-    log(f"   Smart bounds: X[{xmin:.1f}, {xmax:.1f}] Y[{ymin:.1f}, {ymax:.1f}]")
-    log(f"   Smart span: {xmax - xmin:.1f} x {ymax - ymin:.1f}")
+    # Collect geometry in batch
+    log("   Collecting geometry for batch render...")
+    geometry = collect_geometry_batch(msp, bounds)
 
-    # Step 2: Create figure with correct aspect ratio
-    span_x = xmax - xmin
-    span_y = ymax - ymin
-    aspect = span_x / span_y if span_y > 0 else 1
-    fig_h = 40
-    fig_w = fig_h * aspect
-    fig_w = min(max(fig_w, 20), 80)  # clamp between 20 and 80
-
-    log(f"   Figure size: {fig_w:.1f} x {fig_h:.1f}")
-
-    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
-    ax.set_facecolor('white')
-    ax.set_aspect('equal')
-    ax.axis('off')
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
-
-    # Step 3: Draw all entities
-    drawn = 0
-    skipped_text = 0
-
-    def draw_entity(e):
-        nonlocal drawn, skipped_text
-        try:
-            etype = e.dxftype()
-
-            # Skip ALL text - Hebrew causes garbled output
-            if etype in ('TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'):
-                skipped_text += 1
-                return
-
-            color = get_color(e)
-
-            if etype == 'LINE':
-                s, end = e.dxf.start, e.dxf.end
-                ax.plot([s.x, end.x], [s.y, end.y], color=color, linewidth=0.5)
-                drawn += 1
-
-            elif etype == 'LWPOLYLINE':
-                pts = list(e.get_points(format='xy'))
-                if len(pts) >= 2:
-                    xs, ys = zip(*pts)
-                    xs, ys = list(xs), list(ys)
-                    if e.closed:
-                        xs.append(xs[0])
-                        ys.append(ys[0])
-                    ax.plot(xs, ys, color=color, linewidth=0.5)
-                    drawn += 1
-
-            elif etype == 'POLYLINE':
-                try:
-                    pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-                    if len(pts) >= 2:
-                        xs, ys = zip(*pts)
-                        ax.plot(xs, ys, color=color, linewidth=0.5)
-                        drawn += 1
-                except:
-                    pass
-
-            elif etype == 'CIRCLE':
-                c = e.dxf.center
-                r = e.dxf.radius
-                circle = plt.Circle((c.x, c.y), r, fill=False, color=color, linewidth=0.5)
-                ax.add_patch(circle)
-                drawn += 1
-
-            elif etype == 'ARC':
-                c = e.dxf.center
-                r = e.dxf.radius
-                arc = Arc((c.x, c.y), 2*r, 2*r, angle=0,
-                         theta1=e.dxf.start_angle, theta2=e.dxf.end_angle,
-                         color=color, linewidth=0.5)
-                ax.add_patch(arc)
-                drawn += 1
-
-            elif etype == 'POINT':
-                p = e.dxf.location
-                ax.plot(p.x, p.y, '.', color=color, markersize=1)
-                drawn += 1
-
-            elif etype == 'ELLIPSE':
-                try:
-                    c = e.dxf.center
-                    major = e.dxf.major_axis
-                    ratio = e.dxf.ratio
-                    import math
-                    a = (major.x**2 + major.y**2)**0.5
-                    b = a * ratio
-                    angle = math.degrees(math.atan2(major.y, major.x))
-                    from matplotlib.patches import Ellipse
-                    ellipse = Ellipse((c.x, c.y), 2*a, 2*b, angle=angle,
-                                      fill=False, color=color, linewidth=0.5)
-                    ax.add_patch(ellipse)
-                    drawn += 1
-                except:
-                    pass
-
-            elif etype == 'SPLINE':
-                try:
-                    pts = list(e.control_points)
-                    if len(pts) >= 2:
-                        xs = [p[0] for p in pts]
-                        ys = [p[1] for p in pts]
-                        ax.plot(xs, ys, color=color, linewidth=0.5)
-                        drawn += 1
-                except:
-                    pass
-
-        except Exception:
-            pass
-
-    # Pass 1: Draw all direct entities (not INSERTs)
-    for entity in msp_list:
-        if entity.dxftype() != 'INSERT':
-            draw_entity(entity)
-
-    log(f"   Pass 1 (direct): {drawn} drawn, {skipped_text} text skipped")
-    pass1_drawn = drawn
-
-    # Pass 2: Expand ALL block references and draw their contents
-    insert_count = 0
-    blocks_with_content = 0
-
-    for entity in msp_list:
-        if entity.dxftype() == 'INSERT':
-            insert_count += 1
-            try:
-                ves = list(entity.virtual_entities())
-
-                if len(ves) > 0:
-                    blocks_with_content += 1
-
-                for ve in ves:
-                    # Handle nested INSERTs recursively
-                    if ve.dxftype() == 'INSERT':
-                        try:
-                            for nested in ve.virtual_entities():
-                                draw_entity(nested)
-                        except:
-                            pass
-                    else:
-                        draw_entity(ve)
-
-            except Exception as ex:
-                pass
-
-    pass2_drawn = drawn - pass1_drawn
-    log(f"   Pass 2 (blocks): {insert_count} INSERTs, {blocks_with_content} had content, {pass2_drawn} entities drawn")
-    log(f"   TOTAL: {drawn} entities drawn, {skipped_text} text skipped")
-
-    # Save figure
-    fig.savefig(output_path, dpi=dpi, bbox_inches='tight',
-                facecolor='white', pad_inches=0.3)
-    plt.close(fig)
+    # Render using batch method
+    render_batch_to_image(geometry, bounds, output_path, dpi=dpi)
 
     # Check output size
     size_kb = os.path.getsize(output_path) / 1024
     log(f"   Saved: {output_path} ({size_kb:.0f}KB)")
 
-    if size_kb < 50:
-        log("   WARNING: Image very small — likely blank!")
-    elif size_kb > 500:
-        log("   SUCCESS: Image has substantial content")
-
-    return output_path
-
-
-def split_into_zones(image_path, output_dir, grid=(3, 3)):
-    """Split rendered image into zones + create overview (legacy function)."""
-    os.makedirs(output_dir, exist_ok=True)
-    img = Image.open(image_path)
-    w, h = img.size
-
-    log(f"   Image size: {w}x{h}")
-
-    cols, rows = grid
-    zone_w, zone_h = w // cols, h // rows
-
-    paths = []
-
-    # Overview (resized to 2048 max)
-    overview = img.copy()
-    overview.thumbnail((2048, 2048), Image.LANCZOS)
-    overview_path = os.path.join(output_dir, 'overview.jpg')
-    overview.convert('RGB').save(overview_path, 'JPEG', quality=90)
-    paths.append(overview_path)
-
-    # Zones
-    for r in range(rows):
-        for c in range(cols):
-            box = (c * zone_w, r * zone_h, (c + 1) * zone_w, (r + 1) * zone_h)
-            zone = img.crop(box)
-            zone_path = os.path.join(output_dir, f'zone_{r}_{c}.jpg')
-            zone.convert('RGB').save(zone_path, 'JPEG', quality=90)
-            paths.append(zone_path)
-
-    log(f"   Created {len(paths)} images (1 overview + {rows*cols} zones)")
-    return paths
+    return output_path, bounds
 
 
 def split_into_hybrid_zones(image_path, output_dir, msp, global_bounds, num_zones=10, overlap_percent=0.05):
@@ -786,6 +971,8 @@ def main():
     parser.add_argument('--output', '-o', default='/tmp/dxf-analysis', help='Output directory')
     parser.add_argument('--dpi', type=int, default=150, help='Render DPI (default: 150)')
     parser.add_argument('--json', action='store_true', help='Output results as JSON to stdout')
+    parser.add_argument('--sections', action='store_true', help='Force section detection mode for flattened DXF')
+    parser.add_argument('--force-batch', action='store_true', help='Force batch rendering (faster for large files)')
 
     args = parser.parse_args()
 
@@ -797,87 +984,151 @@ def main():
 
     start = datetime.now()
 
+    file_size_mb = os.path.getsize(args.input) / 1024 / 1024
+
     log('=' * 50)
-    log('DXF RENDERER v7 (HYBRID SPATIAL ANALYSIS)')
-    log(f'File: {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
+    log('DXF RENDERER v8 (BATCH + SECTIONS)')
+    log(f'File: {os.path.basename(args.input)} ({file_size_mb:.1f}MB)')
     log('=' * 50)
 
-    # Step 1: Load DXF and calculate smart bounds
-    log('Loading DXF and calculating bounds...')
+    # Step 1: Load DXF and analyze structure
+    log('Loading DXF...')
     doc = read_dxf_safe(args.input)
     msp = doc.modelspace()
 
-    all_x, all_y = collect_all_points(msp)
-    if len(all_x) == 0:
-        log("   ERROR: No geometry points found!")
-        global_bounds = (0, 100, 0, 100)
+    # Count entities
+    msp_list = list(msp)
+    type_counts = {}
+    for e in msp_list:
+        t = e.dxftype()
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    total_entities = len(msp_list)
+    layers = [layer.dxf.name for layer in doc.layers]
+
+    # Check if flattened
+    is_flattened = detect_flattened_dxf(msp, type_counts, layers)
+
+    # Section mode for flattened files OR if --sections flag
+    use_sections = args.sections or (is_flattened and total_entities > 100000)
+
+    if use_sections:
+        # === SECTION DETECTION MODE ===
+        log('Using SECTION DETECTION mode for flattened DXF...')
+
+        section_result = render_dxf_sections(args.input, args.output, dpi=args.dpi)
+
+        if section_result is None:
+            log("ERROR: Section rendering failed!")
+            sys.exit(1)
+
+        elapsed = (datetime.now() - start).total_seconds()
+
+        result = {
+            'success': True,
+            'version': 'v8-sections',
+            'mode': 'sections',
+            'is_flattened': True,
+            'total_entities': total_entities,
+            'sections': section_result['sections'],
+            'section_count': len(section_result['sections']),
+            'entity_counts': type_counts,
+            'layers': layers,
+            'processing_time': elapsed
+        }
+
+        log('=' * 50)
+        log(f'Complete in {elapsed:.1f}s')
+        log(f'Sections rendered: {len(section_result["sections"])}')
+        log(f'Total entities: {total_entities:,}')
+        log('=' * 50)
+
     else:
-        global_bounds = calculate_smart_bounds(all_x, all_y)
+        # === STANDARD HYBRID MODE ===
+        log('Using STANDARD HYBRID mode...')
 
-    log(f"   Smart bounds: X[{global_bounds[0]:.1f}, {global_bounds[1]:.1f}] Y[{global_bounds[2]:.1f}, {global_bounds[3]:.1f}]")
+        # Collect points
+        all_x, all_y = collect_all_points(msp)
+        if len(all_x) == 0:
+            log("   ERROR: No geometry points found!")
+            global_bounds = (0, 100, 0, 100)
+        else:
+            global_bounds = calculate_smart_bounds(all_x, all_y)
 
-    # Step 2: Render DXF to PNG
-    log('Rendering DXF to high-res PNG...')
-    rendered_path = os.path.join(args.output, 'rendered_plan.png')
-    render_dxf(args.input, rendered_path, dpi=args.dpi)
+        log(f"   Smart bounds: X[{global_bounds[0]:.1f}, {global_bounds[1]:.1f}] Y[{global_bounds[2]:.1f}, {global_bounds[3]:.1f}]")
 
-    # Step 2.5: Ensure image doesn't exceed Claude's 8000px limit
-    ensure_max_size(rendered_path, max_dim=7000)
+        # Render
+        log('Rendering DXF to high-res PNG...')
+        rendered_path = os.path.join(args.output, 'rendered_plan.png')
 
-    # Step 3: Split into HYBRID zones with entity data
-    log('Splitting into hybrid analysis zones...')
-    hybrid_data = split_into_hybrid_zones(
-        rendered_path, args.output, msp, global_bounds,
-        num_zones=10, overlap_percent=0.05
-    )
+        # Use batch rendering for large files
+        if total_entities > 50000 or args.force_batch:
+            log('   Using batch rendering for large entity count...')
+            geometry = collect_geometry_batch(msp, global_bounds)
+            render_batch_to_image(geometry, global_bounds, rendered_path, dpi=args.dpi)
+        else:
+            render_dxf_standard(args.input, rendered_path, dpi=args.dpi)
 
-    # Collect all image paths for backward compatibility
-    all_image_paths = [hybrid_data['overview']]
-    for zone in hybrid_data['zones']:
-        all_image_paths.append(zone['image_path'])
+        # Ensure max size
+        ensure_max_size(rendered_path, max_dim=7000)
 
-    # Step 4: Extract metadata
-    log('Extracting DXF metadata...')
-    metadata = extract_metadata(args.input)
+        # Split into hybrid zones
+        log('Splitting into hybrid analysis zones...')
+        hybrid_data = split_into_hybrid_zones(
+            rendered_path, args.output, msp, global_bounds,
+            num_zones=10, overlap_percent=0.05
+        )
 
-    # Save metadata
-    metadata_path = os.path.join(args.output, 'metadata.json')
-    with open(metadata_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
+        # Collect all image paths
+        all_image_paths = [hybrid_data['overview']]
+        for zone in hybrid_data['zones']:
+            all_image_paths.append(zone['image_path'])
 
-    # Save hybrid zone data
-    hybrid_path = os.path.join(args.output, 'hybrid_zones.json')
-    with open(hybrid_path, 'w', encoding='utf-8') as f:
-        json.dump(hybrid_data, f, ensure_ascii=False, indent=2)
+        # Extract metadata
+        log('Extracting DXF metadata...')
+        metadata = extract_metadata(args.input)
 
-    elapsed = (datetime.now() - start).total_seconds()
+        # Save metadata
+        metadata_path = os.path.join(args.output, 'metadata.json')
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    # Count total entities across all zones
-    total_entities_extracted = sum(z['entity_count'] for z in hybrid_data['zones'])
+        # Save hybrid zone data
+        hybrid_path = os.path.join(args.output, 'hybrid_zones.json')
+        with open(hybrid_path, 'w', encoding='utf-8') as f:
+            json.dump(hybrid_data, f, ensure_ascii=False, indent=2)
 
-    result = {
-        'success': True,
-        'version': 'v7-hybrid',
-        'rendered_image': rendered_path,
-        'overview': hybrid_data['overview'],
-        'zones': [z['image_path'] for z in hybrid_data['zones']],
-        'all_images': all_image_paths,
-        'hybrid_data': hybrid_data,
-        'hybrid_path': hybrid_path,
-        'metadata': metadata,
-        'metadata_path': metadata_path,
-        'processing_time': elapsed,
-        'total_entities_extracted': total_entities_extracted
-    }
+        elapsed = (datetime.now() - start).total_seconds()
 
-    log('=' * 50)
-    log(f'Complete in {elapsed:.1f}s')
-    log(f'Rendered: {rendered_path}')
-    log(f'Hybrid zones: {hybrid_data["total_zones"]} (with entity data)')
-    log(f'Entities extracted: {total_entities_extracted} (TEXT/MTEXT/INSERT)')
-    log(f'DXF entities: {metadata["total_entities"]} total')
-    log(f'Layers: {metadata["layer_count"]}')
-    log('=' * 50)
+        # Count total entities across all zones
+        total_entities_extracted = sum(z['entity_count'] for z in hybrid_data['zones'])
+
+        result = {
+            'success': True,
+            'version': 'v8-hybrid',
+            'mode': 'hybrid',
+            'is_flattened': is_flattened,
+            'rendered_image': rendered_path,
+            'overview': hybrid_data['overview'],
+            'zones': [z['image_path'] for z in hybrid_data['zones']],
+            'all_images': all_image_paths,
+            'hybrid_data': hybrid_data,
+            'hybrid_path': hybrid_path,
+            'metadata': metadata,
+            'metadata_path': metadata_path,
+            'processing_time': elapsed,
+            'total_entities_extracted': total_entities_extracted,
+            'total_entities': total_entities
+        }
+
+        log('=' * 50)
+        log(f'Complete in {elapsed:.1f}s')
+        log(f'Rendered: {rendered_path}')
+        log(f'Hybrid zones: {hybrid_data["total_zones"]} (with entity data)')
+        log(f'Entities extracted: {total_entities_extracted} (TEXT/MTEXT/INSERT)')
+        log(f'DXF entities: {metadata["total_entities"]:,} total')
+        log(f'Layers: {metadata["layer_count"]}')
+        log('=' * 50)
 
     # ONLY the JSON result goes to stdout
     if args.json:

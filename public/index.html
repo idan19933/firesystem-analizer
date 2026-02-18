@@ -631,6 +631,72 @@
       color: var(--text-muted);
     }
 
+    /* Regulation Section (Flattened DXF) */
+    .regulation-section {
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), var(--bg-card));
+      border: 2px solid #3b82f6;
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+    .regulation-section h3 {
+      color: #3b82f6;
+      margin-bottom: 20px;
+      font-size: 1.2rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .regulation-summary {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .regulation-stat {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 20px;
+      text-align: center;
+      min-width: 100px;
+    }
+    .regulation-stat.pass { border-color: var(--success); }
+    .regulation-stat.fail { border-color: var(--danger); }
+    .regulation-stat.review { border-color: var(--warning); }
+    .regulation-stat-number {
+      font-size: 1.6rem;
+      font-weight: 800;
+    }
+    .regulation-stat.pass .regulation-stat-number { color: var(--success); }
+    .regulation-stat.fail .regulation-stat-number { color: var(--danger); }
+    .regulation-stat.review .regulation-stat-number { color: var(--warning); }
+    .regulation-stat-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .regulation-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 10px;
+    }
+    .regulation-item {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 0.9rem;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .regulation-item.pass { border-left: 3px solid var(--success); }
+    .regulation-item.fail { border-left: 3px solid var(--danger); }
+    .regulation-item.review { border-left: 3px solid var(--warning); }
+    .regulation-item.not-visible { border-left: 3px solid #6b7280; opacity: 0.7; }
+    .regulation-item-icon { font-size: 1rem; }
+    .regulation-item-name { flex: 1; color: var(--text); }
+
     /* Critical Issues */
     .critical-box {
       background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), var(--bg-card));
@@ -1568,6 +1634,13 @@
       <div class="object-counts-section" id="objectCountsSection" style="display:none">
         <h3>🔥 ספירת אלמנטי בטיחות אש</h3>
         <div class="object-counts-grid" id="objectCountsGrid"></div>
+      </div>
+
+      <!-- Regulation Checks (Flattened DXF Analysis) -->
+      <div class="regulation-section" id="regulationSection" style="display:none">
+        <h3>📋 20 בדיקות תקנות בטיחות אש</h3>
+        <div class="regulation-summary" id="regulationSummary"></div>
+        <div class="regulation-grid" id="regulationGrid"></div>
       </div>
 
       <!-- Critical Issues -->
@@ -2527,6 +2600,61 @@
         objectCountsSection.style.display = 'none';
       }
 
+      // Regulation Checks (Flattened DXF)
+      const regulationSection = document.getElementById('regulationSection');
+      const regulationSummary = document.getElementById('regulationSummary');
+      const regulationGrid = document.getElementById('regulationGrid');
+      const regulationResults = data.rawReport?.regulationResults || a.regulationResults || null;
+
+      if (regulationResults && regulationResults.length > 0) {
+        regulationSection.style.display = 'block';
+
+        // Count statuses
+        const counts = { pass: 0, fail: 0, review: 0, notVisible: 0 };
+        regulationResults.forEach(r => {
+          if (r.status === 'pass') counts.pass++;
+          else if (r.status === 'fail') counts.fail++;
+          else if (r.status === 'needs_review') counts.review++;
+          else counts.notVisible++;
+        });
+
+        regulationSummary.innerHTML = `
+          <div class="regulation-stat pass">
+            <div class="regulation-stat-number">${counts.pass}</div>
+            <div class="regulation-stat-label">עוברות ✅</div>
+          </div>
+          <div class="regulation-stat fail">
+            <div class="regulation-stat-number">${counts.fail}</div>
+            <div class="regulation-stat-label">נכשלות ❌</div>
+          </div>
+          <div class="regulation-stat review">
+            <div class="regulation-stat-number">${counts.review}</div>
+            <div class="regulation-stat-label">לבדיקה ⚠️</div>
+          </div>
+          <div class="regulation-stat">
+            <div class="regulation-stat-number">${counts.notVisible}</div>
+            <div class="regulation-stat-label">לא נראה</div>
+          </div>
+        `;
+
+        regulationGrid.innerHTML = regulationResults.map(r => {
+          let itemClass = 'not-visible';
+          let icon = '❓';
+          if (r.status === 'pass') { itemClass = 'pass'; icon = '✅'; }
+          else if (r.status === 'fail') { itemClass = 'fail'; icon = '❌'; }
+          else if (r.status === 'needs_review') { itemClass = 'review'; icon = '⚠️'; }
+
+          return `
+            <div class="regulation-item ${itemClass}" title="${r.finding || ''}">
+              <span class="regulation-item-icon">${icon}</span>
+              <span class="regulation-item-name">${r.name || r.regulationId}</span>
+            </div>
+          `;
+        }).join('');
+      } else {
+        regulationSection.style.display = 'none';
+      }
+
       // Critical issues
       const criticals = a.criticalIssues || [];
       const criticalBox = document.getElementById('criticalBox');
@@ -2580,6 +2708,7 @@
       document.getElementById('categoriesGrid').innerHTML = '';
       document.getElementById('criticalBox').style.display = 'none';
       document.getElementById('objectCountsSection').style.display = 'none';
+      document.getElementById('regulationSection').style.display = 'none';
       document.getElementById('imageSection').style.display = 'none';
       document.getElementById('vectorSection').style.display = 'none';
       document.getElementById('methodBadgeWrap').style.display = 'none';
