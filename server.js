@@ -1,5 +1,5 @@
 /**
- * Fire Safety & Compliance Checker - Server v37.12
+ * Fire Safety & Compliance Checker - Server v38.0
  *
  * TWO MODES:
  * 1. Fire Safety Mode - Existing functionality
@@ -12,7 +12,11 @@
  * DWG: APS upload -> SVF2 -> Puppeteer screenshot -> Vision
  * DXF: Python ezdxf + matplotlib for high-quality rendering
  *
- * v37.12: Resize images to max 7000px before sending to Claude (8000px limit)
+ * v38.0: HYBRID SPATIAL ANALYSIS
+ *   - Split drawing into overlapping zones with entity data
+ *   - Extract TEXT/MTEXT/INSERT with pixel coordinates per zone
+ *   - Process zones concurrently (2-3 at a time)
+ *   - Aggregate findings with world coordinate mapping
  */
 
 const express = require('express');
@@ -834,9 +838,16 @@ async function renderDXFWithPython(dxfPath, outputDir) {
     }
 
     console.log(`✅ Python render complete in ${jsonResult.processing_time}s`);
+    console.log(`   Version: ${jsonResult.version || 'legacy'}`);
     console.log(`   Entities: ${jsonResult.metadata?.total_entities || 'unknown'}`);
     console.log(`   Overview: ${jsonResult.overview}`);
     console.log(`   Zones: ${jsonResult.zones?.length || 0}`);
+
+    // Check for hybrid data (v7+)
+    if (jsonResult.hybrid_data) {
+      console.log(`   Hybrid zones: ${jsonResult.hybrid_data.total_zones}`);
+      console.log(`   Entities extracted: ${jsonResult.total_entities_extracted || 0}`);
+    }
 
     // Read the rendered image
     const renderedPath = jsonResult.rendered_image || path.join(outputPath, 'rendered_plan.png');
@@ -850,7 +861,11 @@ async function renderDXFWithPython(dxfPath, outputDir) {
         zones: jsonResult.zones,
         allImages: jsonResult.all_images,
         metadata: jsonResult.metadata,
-        outputDir: outputPath
+        outputDir: outputPath,
+        // NEW: Hybrid data for v7+
+        hybridData: jsonResult.hybrid_data || null,
+        hybridPath: jsonResult.hybrid_path || null,
+        version: jsonResult.version || 'legacy'
       };
     } else {
       console.log('⚠️ Rendered image not found at:', renderedPath);
@@ -1328,6 +1343,412 @@ async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
   };
 }
 
+// ===== HYBRID SPATIAL ANALYSIS (v7) =====
+
+/**
+ * Build a hybrid prompt for a single zone with entity data
+ */
+function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
+  const entitySummary = (zone.entities || []).map(e => {
+    if (e.type === 'TEXT' || e.type === 'MTEXT') {
+      return `- טקסט "${e.text}" בפיקסל (${e.pixel_pos[0]}, ${e.pixel_pos[1]})`;
+    } else if (e.type === 'BLOCK') {
+      return `- בלוק "${e.name}" בפיקסל (${e.pixel_pos[0]}, ${e.pixel_pos[1]})`;
+    }
+    return null;
+  }).filter(Boolean).join('\n');
+
+  const basePrompt = analysisType === 'fire-safety' ?
+    `אתה מומחה בטיחות אש ישראלי. נתח את אזור ${zone.zone_id} של התוכנית.` :
+    `אתה בודק היתרי בנייה ישראלי. בדוק את אזור ${zone.zone_id} של התוכנית.`;
+
+  return `${basePrompt}
+
+מיקום באזור: שורה ${zone.grid_position[0]}, עמודה ${zone.grid_position[1]}
+גודל תמונה: ${zone.image_size[0]}x${zone.image_size[1]} פיקסלים
+
+=== טקסטים וסמלים באזור זה (עם קואורדינטות פיקסל) ===
+${entitySummary || '(אין טקסט/בלוקים באזור זה)'}
+
+=== משימת ניתוח ===
+${analysisType === 'fire-safety' ? `
+בדוק את האזור עבור:
+1. ספרינקלרים - מיקום, כמות
+2. גלאי עשן - סוג וכמות
+3. דלתות אש - סימון, כיוון
+4. יציאות חירום - סימון, רוחב
+5. מטפי כיבוי - מיקום
+6. סימני אש - קירות, מדרגות
+7. קרא את הטקסטים בעברית
+
+כשאתה מדווח על ממצאים, כלול את קואורדינטות הפיקסל.
+` : `
+בדוק את האזור עבור:
+1. מידות וכתות
+2. סימונים טכניים
+3. התאמה לדרישות
+4. בעיות פוטנציאליות
+`}
+
+החזר JSON:
+{
+  "zone_id": "${zone.zone_id}",
+  "findings": [
+    {
+      "category": "קטגוריה",
+      "description": "תיאור",
+      "status": "pass|fail|needs_review",
+      "pixel_pos": [x, y],
+      "confidence": 0-100
+    }
+  ],
+  "hebrewTexts": ["טקסטים שזוהו"],
+  "zoneScore": 0-100
+}`;
+}
+
+/**
+ * Analyze a single zone with Claude using hybrid data
+ */
+async function analyzeHybridZoneWithClaude(zone, analysisType = 'fire-safety') {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY not configured');
+  }
+
+  // Read zone image
+  const imagePath = zone.image_path;
+  if (!fs.existsSync(imagePath)) {
+    console.log(`⚠️ Zone image not found: ${imagePath}`);
+    return { zone_id: zone.zone_id, error: 'Image not found', findings: [] };
+  }
+
+  let imageBuffer = fs.readFileSync(imagePath);
+  imageBuffer = await ensureMaxSizeBuffer(imageBuffer, 7000);
+  const mediaType = getMediaType(imageBuffer);
+
+  const prompt = buildHybridZonePrompt(zone, analysisType);
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: mediaType,
+              data: imageBuffer.toString('base64')
+            }
+          },
+          {
+            type: "text",
+            text: prompt
+          }
+        ]
+      }]
+    })
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    console.log(`⚠️ Claude API error for ${zone.zone_id}: ${resp.status}`);
+    return { zone_id: zone.zone_id, error: err, findings: [] };
+  }
+
+  const data = await resp.json();
+  const content = data.content[0].text;
+
+  try {
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+  } catch (e) {
+    console.log(`⚠️ JSON parse failed for ${zone.zone_id}`);
+  }
+
+  return { zone_id: zone.zone_id, findings: [], rawContent: content };
+}
+
+/**
+ * Process zones concurrently with rate limiting
+ */
+async function processZonesConcurrently(zones, analysisType = 'fire-safety', maxConcurrent = 2) {
+  console.log(`🔄 Processing ${zones.length} zones (${maxConcurrent} concurrent)...`);
+
+  const results = [];
+  const queue = [...zones];
+  const inProgress = new Set();
+
+  const processNext = async () => {
+    if (queue.length === 0) return null;
+
+    const zone = queue.shift();
+    const zoneId = zone.zone_id;
+    inProgress.add(zoneId);
+
+    console.log(`   → Starting ${zoneId} (${inProgress.size}/${maxConcurrent} active)`);
+
+    try {
+      const result = await analyzeHybridZoneWithClaude(zone, analysisType);
+      console.log(`   ✓ Completed ${zoneId}`);
+      return { ...zone, analysis: result };
+    } catch (err) {
+      console.log(`   ✗ Failed ${zoneId}: ${err.message}`);
+      return { ...zone, error: err.message };
+    } finally {
+      inProgress.delete(zoneId);
+    }
+  };
+
+  // Process with concurrency limit
+  while (queue.length > 0 || inProgress.size > 0) {
+    // Start new tasks up to the concurrency limit
+    const startPromises = [];
+    while (inProgress.size < maxConcurrent && queue.length > 0) {
+      startPromises.push(processNext());
+    }
+
+    if (startPromises.length > 0) {
+      const batchResults = await Promise.all(startPromises);
+      results.push(...batchResults.filter(r => r !== null));
+    }
+
+    // Small delay to prevent tight loop
+    if (queue.length > 0 || inProgress.size > 0) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Convert pixel coordinates back to world coordinates
+ */
+function pixelToWorld(pixelPos, transform) {
+  const [px, py] = pixelPos;
+  const [imgW, imgH] = transform.image_size;
+  const [xmin, xmax, ymin, ymax] = transform.world_bounds;
+
+  const worldX = xmin + (px / imgW) * (xmax - xmin);
+  const worldY = ymax - (py / imgH) * (ymax - ymin);  // Y flipped
+
+  return [worldX, worldY];
+}
+
+/**
+ * Aggregate results from all zones
+ */
+function aggregateZoneResults(zoneResults, globalBounds) {
+  const allFindings = [];
+  const allTexts = [];
+  let totalScore = 0;
+  let scoreCount = 0;
+
+  for (const zone of zoneResults) {
+    if (!zone.analysis) continue;
+
+    const analysis = zone.analysis;
+
+    // Collect findings with world coordinates
+    if (analysis.findings && Array.isArray(analysis.findings)) {
+      for (const finding of analysis.findings) {
+        let worldPos = null;
+        if (finding.pixel_pos && zone.transform) {
+          worldPos = pixelToWorld(finding.pixel_pos, zone.transform);
+        }
+
+        allFindings.push({
+          ...finding,
+          zone_id: zone.zone_id,
+          grid_position: zone.grid_position,
+          world_position: worldPos
+        });
+      }
+    }
+
+    // Collect Hebrew texts
+    if (analysis.hebrewTexts && Array.isArray(analysis.hebrewTexts)) {
+      allTexts.push(...analysis.hebrewTexts.map(t => ({
+        text: t,
+        zone_id: zone.zone_id
+      })));
+    }
+
+    // Accumulate scores
+    if (typeof analysis.zoneScore === 'number') {
+      totalScore += analysis.zoneScore;
+      scoreCount++;
+    }
+  }
+
+  // Deduplicate findings from overlapping zones
+  const deduplicatedFindings = deduplicateFindings(allFindings);
+
+  // Calculate overall score
+  const overallScore = scoreCount > 0 ? Math.round(totalScore / scoreCount) : 50;
+
+  return {
+    overallScore,
+    status: overallScore >= 70 ? 'PASS' : overallScore >= 40 ? 'NEEDS_REVIEW' : 'FAIL',
+    totalZonesAnalyzed: zoneResults.length,
+    findings: deduplicatedFindings,
+    hebrewTexts: allTexts,
+    globalBounds: globalBounds
+  };
+}
+
+/**
+ * Deduplicate findings from overlapping zones based on proximity
+ */
+function deduplicateFindings(findings) {
+  const deduplicated = [];
+  const proximityThreshold = 50; // pixels
+
+  for (const finding of findings) {
+    // Check if similar finding already exists
+    const isDuplicate = deduplicated.some(existing => {
+      // Same category and similar position
+      if (existing.category !== finding.category) return false;
+
+      if (existing.pixel_pos && finding.pixel_pos) {
+        const dx = Math.abs(existing.pixel_pos[0] - finding.pixel_pos[0]);
+        const dy = Math.abs(existing.pixel_pos[1] - finding.pixel_pos[1]);
+        return dx < proximityThreshold && dy < proximityThreshold;
+      }
+
+      // Same description might indicate duplicate
+      if (existing.description === finding.description) return true;
+
+      return false;
+    });
+
+    if (!isDuplicate) {
+      deduplicated.push(finding);
+    }
+  }
+
+  return deduplicated;
+}
+
+/**
+ * Main hybrid analysis function
+ */
+async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety', customPrompt = null) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY not configured');
+  }
+
+  if (!hybridData || !hybridData.zones || hybridData.zones.length === 0) {
+    console.log('⚠️ No hybrid zones available, falling back to standard analysis');
+    return null;
+  }
+
+  console.log(`🤖 Starting hybrid spatial analysis (${hybridData.total_zones} zones)...`);
+
+  // Process zones concurrently (2-3 at a time to balance speed and rate limits)
+  const zoneResults = await processZonesConcurrently(hybridData.zones, analysisType, 2);
+
+  // Aggregate results
+  const aggregated = aggregateZoneResults(zoneResults, hybridData.global_bounds);
+
+  console.log(`✅ Hybrid analysis complete: ${aggregated.findings.length} findings, score ${aggregated.overallScore}`);
+
+  // Format for fire safety output
+  return {
+    overallScore: aggregated.overallScore,
+    status: aggregated.status,
+    summary: `ניתוח היברידי של ${hybridData.total_zones} אזורים`,
+    categories: groupFindingsByCategory(aggregated.findings),
+    criticalIssues: aggregated.findings.filter(f => f.status === 'fail' && f.confidence > 70).map(f => f.description),
+    positiveFindings: aggregated.findings.filter(f => f.status === 'pass').map(f => f.description),
+    hebrewTexts: aggregated.hebrewTexts.map(t => t.text),
+    detailedReport: generateDetailedReport(aggregated),
+    hybridAnalysis: true,
+    zonesAnalyzed: aggregated.totalZonesAnalyzed,
+    rawZoneResults: zoneResults
+  };
+}
+
+/**
+ * Group findings by category for structured output
+ */
+function groupFindingsByCategory(findings) {
+  const groups = {};
+
+  for (const finding of findings) {
+    const category = finding.category || 'כללי';
+    if (!groups[category]) {
+      groups[category] = {
+        name: category,
+        findings: [],
+        pass: 0,
+        fail: 0,
+        needsReview: 0
+      };
+    }
+
+    groups[category].findings.push(finding.description);
+
+    if (finding.status === 'pass') groups[category].pass++;
+    else if (finding.status === 'fail') groups[category].fail++;
+    else groups[category].needsReview++;
+  }
+
+  return Object.values(groups).map(g => ({
+    name: g.name,
+    score: g.findings.length > 0 ? Math.round((g.pass / g.findings.length) * 100) : 0,
+    status: g.fail > 0 ? 'FAIL' : g.needsReview > 0 ? 'NEEDS_REVIEW' : 'PASS',
+    count: g.findings.length,
+    findings: g.findings,
+    recommendations: []
+  }));
+}
+
+/**
+ * Generate detailed report from aggregated findings
+ */
+function generateDetailedReport(aggregated) {
+  const lines = [
+    `דוח ניתוח היברידי - ${aggregated.totalZonesAnalyzed} אזורים נבדקו`,
+    `ציון כולל: ${aggregated.overallScore}/100`,
+    '',
+    `סה"כ ממצאים: ${aggregated.findings.length}`,
+    `  - עובר: ${aggregated.findings.filter(f => f.status === 'pass').length}`,
+    `  - נכשל: ${aggregated.findings.filter(f => f.status === 'fail').length}`,
+    `  - דורש בדיקה: ${aggregated.findings.filter(f => f.status === 'needs_review').length}`,
+    ''
+  ];
+
+  // Add findings by zone
+  const byZone = {};
+  for (const f of aggregated.findings) {
+    if (!byZone[f.zone_id]) byZone[f.zone_id] = [];
+    byZone[f.zone_id].push(f);
+  }
+
+  for (const [zoneId, zoneFindings] of Object.entries(byZone)) {
+    lines.push(`--- ${zoneId} ---`);
+    for (const f of zoneFindings) {
+      const statusIcon = f.status === 'pass' ? '✓' : f.status === 'fail' ? '✗' : '?';
+      lines.push(`${statusIcon} ${f.category || 'כללי'}: ${f.description}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
 // ===== EXTRACT FROM ZIP =====
 function extractFromZip(filePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
@@ -1424,7 +1845,7 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: 'ok',
-    version: '37.10.0',
+    version: '38.0.0',
     puppeteer: puppeteer ? 'available' : 'not installed',
     sharp: sharp ? 'available' : 'not installed',
     python: pythonStatus,
@@ -2166,23 +2587,55 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
         const fullImage = pythonResult.buffer;
         screenshotUrl = `/screenshots/${screenshotId}.png`;
 
-        // Split into zones
-        const zones = await splitIntoZones(fullImage);
-        screenshotCache.set(screenshotId, { full: fullImage, zones });
+        // Check for hybrid data (v7+)
+        if (pythonResult.hybridData && pythonResult.hybridData.zones && pythonResult.hybridData.zones.length > 0) {
+          console.log(`🔬 Using HYBRID spatial analysis (${pythonResult.hybridData.total_zones} zones with entity data)`);
 
-        // Analyze with Claude Vision
-        report = await analyzeWithClaudeVision(fullImage, zones, customPrompt);
+          // Use hybrid analysis with concurrent zone processing
+          report = await analyzeWithClaudeHybrid(pythonResult.hybridData, 'fire-safety', customPrompt);
 
-        analysisData = {
-          method: 'DXF Python Render + Vision',
-          screenshotUrl,
-          zones: 9,
-          imagesAnalyzed: 10,
-          entities: pythonResult.metadata?.total_entities || 'unknown',
-          layers: pythonResult.metadata?.layer_count || 'unknown'
-        };
+          // Also load zones for cache (for zone preview endpoint)
+          const zones = pythonResult.hybridData.zones.map(z => {
+            if (fs.existsSync(z.image_path)) {
+              return fs.readFileSync(z.image_path);
+            }
+            return null;
+          }).filter(z => z !== null);
 
-        // Clean up Python output dir
+          screenshotCache.set(screenshotId, { full: fullImage, zones });
+
+          analysisData = {
+            method: 'DXF Hybrid Spatial Analysis (v7)',
+            screenshotUrl,
+            zones: pythonResult.hybridData.total_zones,
+            imagesAnalyzed: pythonResult.hybridData.total_zones,
+            entitiesExtracted: pythonResult.hybridData.zones.reduce((sum, z) => sum + (z.entity_count || 0), 0),
+            entities: pythonResult.metadata?.total_entities || 'unknown',
+            layers: pythonResult.metadata?.layer_count || 'unknown',
+            hybridAnalysis: true
+          };
+        } else {
+          // Legacy mode: standard vision analysis
+          console.log('📸 Using standard Vision analysis (no hybrid data)');
+
+          // Split into zones
+          const zones = await splitIntoZones(fullImage);
+          screenshotCache.set(screenshotId, { full: fullImage, zones });
+
+          // Analyze with Claude Vision
+          report = await analyzeWithClaudeVision(fullImage, zones, customPrompt);
+
+          analysisData = {
+            method: 'DXF Python Render + Vision',
+            screenshotUrl,
+            zones: 9,
+            imagesAnalyzed: 10,
+            entities: pythonResult.metadata?.total_entities || 'unknown',
+            layers: pythonResult.metadata?.layer_count || 'unknown'
+          };
+        }
+
+        // Clean up Python output dir (unless we need it for debugging)
         if (pythonResult.outputDir) {
           try { fs.rmSync(pythonResult.outputDir, { recursive: true, force: true }); } catch (e) {}
         }

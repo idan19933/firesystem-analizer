@@ -3,6 +3,12 @@
 DXF Fire Safety Analyzer - Python Pipeline
 Renders DXF to high-res image using ezdxf + matplotlib, then outputs for Claude Vision analysis.
 
+v7: HYBRID SPATIAL ANALYSIS
+    - Splits drawing into overlapping zones
+    - Extracts TEXT/MTEXT/INSERT entities with pixel coordinates per zone
+    - Outputs hybrid JSON: zone images + entity data for context-aware AI analysis
+    - CoordinateTransformer maps DXF world coords to PNG pixel coords
+
 v6: SMART BOUNDS - Percentile-based bounds exclude outlier points
     - Outliers (title block xrefs, north arrows) don't destroy view
     - Uses 2nd/98th percentile + IQR fallback for concentrated content
@@ -61,6 +67,41 @@ def ensure_max_size(image_path, max_dim=7000):
         img.save(image_path)
         log(f"   Resized: {w}x{h} -> {new_size[0]}x{new_size[1]} (max {max_dim}px)")
     return image_path
+
+
+class CoordinateTransformer:
+    """Maps DXF world coordinates to PNG pixel coordinates."""
+
+    def __init__(self, world_bounds, image_size):
+        """
+        Args:
+            world_bounds: tuple (xmin, xmax, ymin, ymax) in DXF world coordinates
+            image_size: tuple (width, height) in pixels
+        """
+        self.world_xmin, self.world_xmax = world_bounds[0], world_bounds[1]
+        self.world_ymin, self.world_ymax = world_bounds[2], world_bounds[3]
+        self.img_width, self.img_height = image_size
+
+        # Calculate scale factors
+        world_width = self.world_xmax - self.world_xmin
+        world_height = self.world_ymax - self.world_ymin
+
+        self.scale_x = self.img_width / world_width if world_width > 0 else 1
+        self.scale_y = self.img_height / world_height if world_height > 0 else 1
+
+    def world_to_pixel(self, x, y):
+        """Convert DXF world coords to PNG pixel coords."""
+        px = (x - self.world_xmin) * self.scale_x
+        py = self.img_height - (y - self.world_ymin) * self.scale_y  # Y flipped
+        return int(px), int(py)
+
+    def to_dict(self):
+        """Serialize transform for JSON output."""
+        return {
+            'world_bounds': [self.world_xmin, self.world_xmax, self.world_ymin, self.world_ymax],
+            'image_size': [self.img_width, self.img_height],
+            'scale': [self.scale_x, self.scale_y]
+        }
 
 
 def read_dxf_safe(filepath):
@@ -213,6 +254,99 @@ def collect_all_points(msp):
             collect(e)
 
     return all_x, all_y
+
+
+def extract_zone_entities(msp, zone_bounds, transformer):
+    """Extract TEXT/MTEXT/INSERT entities within zone bounds with pixel coordinates."""
+    entities = []
+    xmin, xmax, ymin, ymax = zone_bounds
+
+    for entity in msp:
+        try:
+            etype = entity.dxftype()
+
+            if etype == 'TEXT':
+                pos = entity.dxf.insert
+                if xmin <= pos.x <= xmax and ymin <= pos.y <= ymax:
+                    px, py = transformer.world_to_pixel(pos.x, pos.y)
+                    text = safe_text(entity.dxf.text) if hasattr(entity.dxf, 'text') else ''
+                    entities.append({
+                        'type': 'TEXT',
+                        'text': text,
+                        'world_pos': [float(pos.x), float(pos.y)],
+                        'pixel_pos': [px, py],
+                        'height': float(entity.dxf.height) if hasattr(entity.dxf, 'height') else 0
+                    })
+
+            elif etype == 'MTEXT':
+                pos = entity.dxf.insert
+                if xmin <= pos.x <= xmax and ymin <= pos.y <= ymax:
+                    px, py = transformer.world_to_pixel(pos.x, pos.y)
+                    text = safe_text(entity.text) if hasattr(entity, 'text') else ''
+                    entities.append({
+                        'type': 'MTEXT',
+                        'text': text,
+                        'world_pos': [float(pos.x), float(pos.y)],
+                        'pixel_pos': [px, py]
+                    })
+
+            elif etype == 'INSERT':
+                pos = entity.dxf.insert
+                if xmin <= pos.x <= xmax and ymin <= pos.y <= ymax:
+                    px, py = transformer.world_to_pixel(pos.x, pos.y)
+                    entities.append({
+                        'type': 'BLOCK',
+                        'name': entity.dxf.name,
+                        'world_pos': [float(pos.x), float(pos.y)],
+                        'pixel_pos': [px, py]
+                    })
+
+        except Exception:
+            pass
+
+    return entities
+
+
+def calculate_zones_with_overlap(bounds, num_zones=10, overlap_percent=0.05):
+    """Split bounds into overlapping zones for comprehensive coverage."""
+    xmin, xmax, ymin, ymax = bounds
+    width = xmax - xmin
+    height = ymax - ymin
+
+    if width <= 0 or height <= 0:
+        return [{'id': 'zone_0_0', 'bounds': bounds, 'grid_pos': [0, 0]}]
+
+    # Determine grid (e.g., 4x3 = 12 zones, or 5x2 = 10)
+    aspect = width / height
+    cols = max(1, int(np.ceil(np.sqrt(num_zones * aspect))))
+    rows = max(1, int(np.ceil(num_zones / cols)))
+
+    zone_width = width / cols
+    zone_height = height / rows
+    overlap_x = zone_width * overlap_percent
+    overlap_y = zone_height * overlap_percent
+
+    zones = []
+    for row in range(rows):
+        for col in range(cols):
+            z_xmin = xmin + col * zone_width - overlap_x
+            z_xmax = xmin + (col + 1) * zone_width + overlap_x
+            z_ymin = ymin + row * zone_height - overlap_y
+            z_ymax = ymin + (row + 1) * zone_height + overlap_y
+
+            # Clamp to global bounds
+            z_xmin = max(z_xmin, xmin - overlap_x)
+            z_xmax = min(z_xmax, xmax + overlap_x)
+            z_ymin = max(z_ymin, ymin - overlap_y)
+            z_ymax = min(z_ymax, ymax + overlap_y)
+
+            zones.append({
+                'id': f'zone_{row}_{col}',
+                'bounds': [z_xmin, z_xmax, z_ymin, z_ymax],
+                'grid_pos': [row, col]
+            })
+
+    return zones
 
 
 def render_dxf(dxf_path, output_path, dpi=150):
@@ -433,7 +567,7 @@ def render_dxf(dxf_path, output_path, dpi=150):
 
 
 def split_into_zones(image_path, output_dir, grid=(3, 3)):
-    """Split rendered image into zones + create overview."""
+    """Split rendered image into zones + create overview (legacy function)."""
     os.makedirs(output_dir, exist_ok=True)
     img = Image.open(image_path)
     w, h = img.size
@@ -463,6 +597,96 @@ def split_into_zones(image_path, output_dir, grid=(3, 3)):
 
     log(f"   Created {len(paths)} images (1 overview + {rows*cols} zones)")
     return paths
+
+
+def split_into_hybrid_zones(image_path, output_dir, msp, global_bounds, num_zones=10, overlap_percent=0.05):
+    """
+    Split rendered image into overlapping zones with entity data.
+
+    Returns:
+        dict with hybrid zone data including images, bounds, transforms, and entities
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    img = Image.open(image_path)
+    img_w, img_h = img.size
+
+    log(f"   Image size: {img_w}x{img_h}")
+
+    # Calculate zones in DXF world coordinates
+    zones_config = calculate_zones_with_overlap(global_bounds, num_zones, overlap_percent)
+    log(f"   Calculated {len(zones_config)} zones with {overlap_percent*100:.0f}% overlap")
+
+    # Create global transformer (whole image)
+    global_transformer = CoordinateTransformer(global_bounds, (img_w, img_h))
+
+    # Overview (resized to 2048 max)
+    overview = img.copy()
+    overview.thumbnail((2048, 2048), Image.LANCZOS)
+    overview_path = os.path.join(output_dir, 'overview.jpg')
+    overview.convert('RGB').save(overview_path, 'JPEG', quality=90)
+
+    hybrid_zones = []
+
+    for zone_cfg in zones_config:
+        zone_id = zone_cfg['id']
+        zone_bounds = zone_cfg['bounds']  # [xmin, xmax, ymin, ymax] in DXF coords
+        grid_pos = zone_cfg['grid_pos']
+
+        # Convert zone DXF bounds to pixel bounds in the full image
+        px1, py1 = global_transformer.world_to_pixel(zone_bounds[0], zone_bounds[3])  # top-left (ymax because Y flipped)
+        px2, py2 = global_transformer.world_to_pixel(zone_bounds[1], zone_bounds[2])  # bottom-right (ymin)
+
+        # Clamp to image bounds
+        px1 = max(0, min(px1, img_w))
+        px2 = max(0, min(px2, img_w))
+        py1 = max(0, min(py1, img_h))
+        py2 = max(0, min(py2, img_h))
+
+        # Ensure valid crop box
+        if px1 >= px2 or py1 >= py2:
+            log(f"   Skipping {zone_id}: invalid crop box ({px1},{py1}) to ({px2},{py2})")
+            continue
+
+        # Crop zone from image
+        zone_img = img.crop((px1, py1, px2, py2))
+        zone_w, zone_h = zone_img.size
+
+        if zone_w < 10 or zone_h < 10:
+            log(f"   Skipping {zone_id}: too small ({zone_w}x{zone_h})")
+            continue
+
+        zone_path = os.path.join(output_dir, f'{zone_id}.jpg')
+        zone_img.convert('RGB').save(zone_path, 'JPEG', quality=90)
+
+        # Create transformer for this zone's coordinate space
+        zone_transformer = CoordinateTransformer(zone_bounds, (zone_w, zone_h))
+
+        # Extract entities within this zone's bounds
+        entities = extract_zone_entities(msp, zone_bounds, zone_transformer)
+
+        hybrid_zones.append({
+            'zone_id': zone_id,
+            'image_path': zone_path,
+            'image_size': [zone_w, zone_h],
+            'bounds': zone_bounds,
+            'grid_position': grid_pos,
+            'transform': zone_transformer.to_dict(),
+            'entities': entities,
+            'entity_count': len(entities)
+        })
+
+        log(f"   {zone_id}: {zone_w}x{zone_h}px, {len(entities)} entities")
+
+    log(f"   Created {len(hybrid_zones)} hybrid zones")
+
+    return {
+        'overview': overview_path,
+        'overview_size': list(overview.size),
+        'global_bounds': list(global_bounds),
+        'global_transform': global_transformer.to_dict(),
+        'zones': hybrid_zones,
+        'total_zones': len(hybrid_zones)
+    }
 
 
 def safe_text(s):
@@ -574,23 +798,45 @@ def main():
     start = datetime.now()
 
     log('=' * 50)
-    log('DXF RENDERER v6 (SMART BOUNDS - outlier exclusion)')
+    log('DXF RENDERER v7 (HYBRID SPATIAL ANALYSIS)')
     log(f'File: {os.path.basename(args.input)} ({os.path.getsize(args.input) / 1024 / 1024:.1f}MB)')
     log('=' * 50)
 
-    # Step 1: Render DXF to PNG
+    # Step 1: Load DXF and calculate smart bounds
+    log('Loading DXF and calculating bounds...')
+    doc = read_dxf_safe(args.input)
+    msp = doc.modelspace()
+
+    all_x, all_y = collect_all_points(msp)
+    if len(all_x) == 0:
+        log("   ERROR: No geometry points found!")
+        global_bounds = (0, 100, 0, 100)
+    else:
+        global_bounds = calculate_smart_bounds(all_x, all_y)
+
+    log(f"   Smart bounds: X[{global_bounds[0]:.1f}, {global_bounds[1]:.1f}] Y[{global_bounds[2]:.1f}, {global_bounds[3]:.1f}]")
+
+    # Step 2: Render DXF to PNG
     log('Rendering DXF to high-res PNG...')
     rendered_path = os.path.join(args.output, 'rendered_plan.png')
     render_dxf(args.input, rendered_path, dpi=args.dpi)
 
-    # Step 1.5: Ensure image doesn't exceed Claude's 8000px limit
+    # Step 2.5: Ensure image doesn't exceed Claude's 8000px limit
     ensure_max_size(rendered_path, max_dim=7000)
 
-    # Step 2: Split into zones
-    log('Splitting into analysis zones...')
-    image_paths = split_into_zones(rendered_path, args.output)
+    # Step 3: Split into HYBRID zones with entity data
+    log('Splitting into hybrid analysis zones...')
+    hybrid_data = split_into_hybrid_zones(
+        rendered_path, args.output, msp, global_bounds,
+        num_zones=10, overlap_percent=0.05
+    )
 
-    # Step 3: Extract metadata
+    # Collect all image paths for backward compatibility
+    all_image_paths = [hybrid_data['overview']]
+    for zone in hybrid_data['zones']:
+        all_image_paths.append(zone['image_path'])
+
+    # Step 4: Extract metadata
     log('Extracting DXF metadata...')
     metadata = extract_metadata(args.input)
 
@@ -599,23 +845,37 @@ def main():
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
+    # Save hybrid zone data
+    hybrid_path = os.path.join(args.output, 'hybrid_zones.json')
+    with open(hybrid_path, 'w', encoding='utf-8') as f:
+        json.dump(hybrid_data, f, ensure_ascii=False, indent=2)
+
     elapsed = (datetime.now() - start).total_seconds()
+
+    # Count total entities across all zones
+    total_entities_extracted = sum(z['entity_count'] for z in hybrid_data['zones'])
 
     result = {
         'success': True,
+        'version': 'v7-hybrid',
         'rendered_image': rendered_path,
-        'overview': image_paths[0],
-        'zones': image_paths[1:],
-        'all_images': image_paths,
+        'overview': hybrid_data['overview'],
+        'zones': [z['image_path'] for z in hybrid_data['zones']],
+        'all_images': all_image_paths,
+        'hybrid_data': hybrid_data,
+        'hybrid_path': hybrid_path,
         'metadata': metadata,
         'metadata_path': metadata_path,
-        'processing_time': elapsed
+        'processing_time': elapsed,
+        'total_entities_extracted': total_entities_extracted
     }
 
     log('=' * 50)
     log(f'Complete in {elapsed:.1f}s')
     log(f'Rendered: {rendered_path}')
-    log(f'Entities in file: {metadata["total_entities"]}')
+    log(f'Hybrid zones: {hybrid_data["total_zones"]} (with entity data)')
+    log(f'Entities extracted: {total_entities_extracted} (TEXT/MTEXT/INSERT)')
+    log(f'DXF entities: {metadata["total_entities"]} total')
     log(f'Layers: {metadata["layer_count"]}')
     log('=' * 50)
 
