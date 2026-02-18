@@ -2587,13 +2587,22 @@ async function classifySectionsWithClaude(sections) {
               },
               {
                 type: 'text',
-                text: `סווג את סוג התכנית הזו. החזר JSON בלבד:
-{
-  "type": "floor_plan|section|elevation|site_plan|fire_system|sprinkler|details|other",
-  "floor": "קומה (אם רלוונטי): קרקע/ראשונה/שנייה/גג/מרתף/לא רלוונטי",
-  "relevance_to_fire": "high|medium|low",
-  "hebrew_label": "תיאור קצר בעברית"
-}`
+                text: `This is one section from a multi-sheet Israeli building plan (תוכנית בנייה).
+
+Classify this section. Common types in Israeli building plans:
+- "water_schematic" — pipe layout, סכמת מים, VORTEX PLATE
+- "floor_plan" — room layout with walls, doors, dimensions, stairs (תוכנית קומה)
+- "elevation" — building facade view from outside (חזית)
+- "building_section" — vertical cut through building showing floors (חתך)
+- "roof_plan" — roof layout from above (תוכנית גגות)
+- "site_plan" — plot boundary, roads, topography (תוכנית מגרש)
+- "notes_legend" — text notes, tables, legend symbols, area calculations (הערות ומקרא)
+- "detail" — zoomed construction detail
+
+Return ONLY JSON:
+{"type":"water_schematic|floor_plan|elevation|building_section|roof_plan|site_plan|notes_legend|detail","confidence":0-100,"fire_relevant":"critical|high|medium|low"}
+
+IMPORTANT: If you see room layouts with walls and dimensions, it's a floor_plan. If you see a facade/front of building, it's an elevation. If you see text tables and notes, it's notes_legend (mark as "critical" fire relevance). If you see pipes and water flow, it's water_schematic (mark as "critical").`
               }
             ]
           }]
@@ -2603,11 +2612,13 @@ async function classifySectionsWithClaude(sections) {
       if (resp.ok) {
         const data = await resp.json();
         const content = data.content[0].text;
-        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        // Strip markdown code fences if present
+        const cleanContent = content.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+        const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const classification = JSON.parse(jsonMatch[0]);
           classifiedSections.push({ ...section, classification });
-          console.log(`   Section ${section.sectionId}: ${classification.type} (${classification.relevance_to_fire})`);
+          console.log(`   Section ${section.sectionId}: ${classification.type} (${classification.fire_relevant || 'unknown'})`);
         } else {
           classifiedSections.push({ ...section, classification: { type: 'unknown' } });
         }
@@ -2789,6 +2800,7 @@ const FIRE_SAFETY_REGULATIONS = [
 
 /**
  * Run 20-check fire safety regulation analysis on classified sections
+ * v40.1: Priority-based section selection + skip blank images + better prompt
  */
 async function runRegulationChecks(classifiedSections, additionalContext = {}) {
   if (!ANTHROPIC_API_KEY) {
@@ -2797,70 +2809,120 @@ async function runRegulationChecks(classifiedSections, additionalContext = {}) {
 
   console.log(`📋 Running 20-check fire safety regulation analysis...`);
 
-  // Find relevant sections for fire safety analysis
-  const relevantSections = classifiedSections.filter(s =>
-    s.classification?.relevance_to_fire === 'high' ||
-    s.classification?.type === 'floor_plan' ||
-    s.classification?.type === 'fire_system' ||
-    s.classification?.type === 'sprinkler'
-  );
+  // Priority order: notes_legend first (80% of fire data), then floor_plans, water_schematic
+  const priorityOrder = ['notes_legend', 'water_schematic', 'floor_plan', 'fire_system', 'building_section', 'roof_plan', 'detail', 'site_plan', 'elevation'];
 
-  if (relevantSections.length === 0) {
-    console.log('⚠️ No relevant sections found, using all sections');
-    relevantSections.push(...classifiedSections.slice(0, 3)); // Use first 3
+  // Group sections by type
+  const sectionsByType = {};
+  for (const sec of classifiedSections) {
+    const type = sec.classification?.type || 'unknown';
+    if (!sectionsByType[type]) sectionsByType[type] = [];
+    sectionsByType[type].push(sec);
   }
 
-  console.log(`   Analyzing ${relevantSections.length} relevant sections...`);
-
-  // Build regulation checklist text
-  const regulationList = FIRE_SAFETY_REGULATIONS.map(r =>
-    `${r.id}: ${r.name} - ${r.description} (${r.standard})`
-  ).join('\n');
-
-  // Analyze relevant sections
-  const imageContents = [];
-  for (const section of relevantSections.slice(0, 4)) { // Max 4 sections
-    if (section.buffer) {
-      imageContents.push({
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: 'image/png',
-          data: section.buffer.toString('base64')
-        }
-      });
+  // Select key sections in priority order (max 8)
+  const keySections = [];
+  for (const type of priorityOrder) {
+    const sections = sectionsByType[type] || [];
+    for (const sec of sections) {
+      if (keySections.length < 8) {
+        keySections.push(sec);
+      }
     }
   }
 
-  const prompt = `אתה מומחה בטיחות אש ישראלי. בדוק את התכניות הבאות מול 20 התקנות הישראליות:
+  // If no key sections found, use first few of any type
+  if (keySections.length === 0) {
+    keySections.push(...classifiedSections.slice(0, 4));
+  }
 
-=== רשימת תקנות לבדיקה ===
-${regulationList}
+  console.log(`   Selected ${keySections.length} key sections for analysis:`);
+  keySections.forEach(s => console.log(`      ${s.classification?.type || 'unknown'} — ${s.sizeKb || '?'}KB`));
 
-=== הוראות ===
-לכל תקנה מהרשימה, קבע:
-- status: "pass" (עובר), "fail" (נכשל), "needs_review" (דורש בדיקה), "not_visible" (לא נראה בתכנית)
-- finding: מה מצאת בתכנית
-- confidence: רמת ביטחון 0-100
-- location: איפה בתכנית (אם רלוונטי)
+  // Build image array — SKIP any images smaller than 30KB (likely blank)
+  const imageContents = [];
+  const includedSections = [];
 
-החזר JSON בפורמט:
+  for (const section of keySections) {
+    if (!section.buffer) continue;
+
+    // Skip images that are too small (likely blank)
+    if (section.buffer.length < 30000) {
+      console.log(`   ⚠️ Skipping ${section.classification?.type || 'unknown'} — too small (${Math.round(section.buffer.length/1024)}KB)`);
+      continue;
+    }
+
+    let mediaType = 'image/png';
+    // Check for JPEG magic bytes
+    if (section.buffer[0] === 0xFF && section.buffer[1] === 0xD8) {
+      mediaType = 'image/jpeg';
+    }
+
+    imageContents.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: mediaType,
+        data: section.buffer.toString('base64')
+      }
+    });
+    includedSections.push(section);
+  }
+
+  if (imageContents.length === 0) {
+    console.log('❌ No readable section images — all too small or missing');
+    return { overallScore: 25, status: 'NEEDS_REVIEW', regulationResults: [], summary: 'לא נמצאו תמונות קריאות לניתוח' };
+  }
+
+  console.log(`📤 Sending ${imageContents.length} images to Claude for regulation analysis...`);
+
+  // Build section labels for the prompt
+  const sectionLabels = includedSections.map((s, i) => `Image ${i+1}: ${s.classification?.type || 'unknown'}`).join(', ');
+
+  // Enhanced regulation prompt with section context
+  const prompt = `You are an Israeli fire safety expert (יועץ בטיחות אש).
+
+These are sections from a building plan: ${sectionLabels}
+
+For EACH of these 20 fire safety checks, look at the images and determine:
+- PASS: clear evidence found
+- LIKELY_PASS: indirect evidence or referenced via standards
+- FAIL: required but missing
+- NOT_VISIBLE: can't determine from these images
+
+1. Fire resistance classification table (II-222) — ת"י 931
+2. Escape routes (≥2 exits per floor) — סעיף 3.2
+3. Travel distance (≤60m, ≤75m with sprinklers) — סעיף 3.3
+4. Protected stairwells — סעיף 3.4
+5. Headroom ≥2.1m in escape routes — סעיף 3.2.5
+6. Fire doors with ratings (e.g. 90/30) — ת"י 1003
+7. Fire compartmentation (walls, shafts, penetrations) — סעיף 3.6
+8. Sprinkler system — ת"י 1596 / NFPA 13
+9. Water supply system — סעיף 3.8
+10. Fire detection system — ת"י 1220
+11. FM-200 / special suppression — NFPA-2001
+12. Smoke control ventilation — ת"י 1001
+13. Emergency lighting / electrical — ת"י 6439
+14. Fire extinguishers & hose reels — סעיף 3.9
+15. Fire service vehicle access — סעיף 3.10
+16. Gas safety — סעיף 3.11
+17. Elevator shaft protection — סעיף 3.12
+18. Railings (≥1.05m) — ת"י 1142
+19. Building materials fire resistance — ת"י 931
+20. Complete plan set (all sheets present)
+
+IMPORTANT: Look carefully at ANY text visible in the images — Hebrew notes, title blocks, tables, dimensions. The notes section contains most of the fire safety specifications.
+
+Return ONLY a JSON object:
 {
   "overallScore": 0-100,
   "status": "PASS|FAIL|NEEDS_REVIEW",
   "regulationResults": [
-    {
-      "regulationId": "REG-001",
-      "name": "מרחק ספרינקלרים",
-      "status": "pass|fail|needs_review|not_visible",
-      "finding": "מה נמצא",
-      "confidence": 85,
-      "location": "איפה"
-    }
+    {"regulationId":"REG-001","name":"Fire Resistance","status":"PASS|FAIL|NEEDS_REVIEW|NOT_VISIBLE","finding":"what you found","confidence":85}
   ],
-  "summary": "סיכום כללי בעברית",
-  "criticalIssues": ["בעיות קריטיות"],
-  "recommendations": ["המלצות"]
+  "summary": "סיכום בעברית",
+  "criticalIssues": [],
+  "recommendations": []
 }`;
 
   try {
@@ -2889,30 +2951,48 @@ ${regulationList}
     }
 
     const data = await resp.json();
-    const content = data.content[0].text;
+    let content = data.content[0].text;
+
+    // Strip markdown code fences if present
+    content = content.replace(/```json\s*/g, '').replace(/```\s*/g, '');
 
     // Parse JSON response
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const result = JSON.parse(jsonMatch[0]);
-      console.log(`✅ Regulation check complete: ${result.overallScore}/100`);
+    const jsonStart = content.indexOf('{');
+    const jsonEnd = content.lastIndexOf('}');
 
-      // Count results
-      const counts = {
-        pass: 0, fail: 0, needsReview: 0, notVisible: 0
-      };
-      for (const r of result.regulationResults || []) {
-        if (r.status === 'pass') counts.pass++;
-        else if (r.status === 'fail') counts.fail++;
-        else if (r.status === 'needs_review') counts.needsReview++;
-        else counts.notVisible++;
-      }
-      console.log(`   Results: ${counts.pass} pass, ${counts.fail} fail, ${counts.needsReview} review, ${counts.notVisible} not visible`);
-
-      return result;
+    if (jsonStart === -1 || jsonEnd === -1) {
+      console.log('❌ Claude did not return valid JSON. Response:', content.substring(0, 200));
+      return { overallScore: 50, status: 'NEEDS_REVIEW', regulationResults: [], summary: 'לא הצלחנו לנתח את התשובה' };
     }
 
-    return { overallScore: 0, status: 'NEEDS_REVIEW', regulationResults: [], summary: 'לא הצלחנו לנתח את התכנית' };
+    const result = JSON.parse(content.substring(jsonStart, jsonEnd + 1));
+
+    // If Claude returned checks instead of regulationResults, normalize
+    if (result.checks && !result.regulationResults) {
+      result.regulationResults = result.checks.map((c, i) => ({
+        regulationId: `REG-${String(i+1).padStart(3, '0')}`,
+        name: c.name,
+        status: c.status?.toLowerCase().replace('likely_pass', 'pass').replace('not_visible', 'not_visible') || 'not_visible',
+        finding: c.evidence || c.finding || '',
+        confidence: c.score || c.confidence || 50
+      }));
+    }
+
+    console.log(`✅ Regulation check complete: ${result.overallScore}/100`);
+
+    // Count results
+    const counts = { pass: 0, fail: 0, needsReview: 0, notVisible: 0 };
+    for (const r of result.regulationResults || []) {
+      const status = (r.status || '').toLowerCase();
+      if (status === 'pass' || status === 'likely_pass') counts.pass++;
+      else if (status === 'fail') counts.fail++;
+      else if (status === 'needs_review') counts.needsReview++;
+      else counts.notVisible++;
+    }
+    console.log(`   Results: ${counts.pass} pass, ${counts.fail} fail, ${counts.needsReview} review, ${counts.notVisible} not visible`);
+
+    return result;
+
   } catch (err) {
     console.log(`⚠️ Regulation check error: ${err.message}`);
     return { overallScore: 0, status: 'NEEDS_REVIEW', regulationResults: [], summary: `שגיאה: ${err.message}` };

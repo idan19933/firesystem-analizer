@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""analyze_dxf.py v8 — Batch render + auto section detection for flattened DXF"""
+"""analyze_dxf.py v8.1 — Batch render + section detection + higher quality output"""
 import sys, json, os, time
 
 def log(msg):
@@ -107,36 +107,38 @@ def analyze(dxf_path, output_dir):
     aspect = width / max(height, 1)
     log(f"Bounds: X[{xmin:.1f}, {xmax:.1f}] Y[{ymin:.1f}, {ymax:.1f}] Aspect: {aspect:.1f}:1")
 
-    def batch_render(ax_obj):
+    def batch_render(ax_obj, lw=0.25):
         """Draw all collected geometry onto a matplotlib axes."""
         if line_xs:
-            ax_obj.plot(line_xs, line_ys, color='black', linewidth=0.15, solid_capstyle='round')
+            ax_obj.plot(line_xs, line_ys, color='black', linewidth=lw, solid_capstyle='round')
         if poly_xs:
-            ax_obj.plot(poly_xs, poly_ys, color='black', linewidth=0.15, solid_capstyle='round')
+            ax_obj.plot(poly_xs, poly_ys, color='black', linewidth=lw, solid_capstyle='round')
 
-    def save_image(fig_obj, path, max_px=7000):
+    def save_image(fig_obj, path, max_px=5000, dpi=300):
         """Save figure and resize if too large for Claude API."""
-        fig_obj.savefig(path, dpi=200, bbox_inches='tight', facecolor='white', pad_inches=0.2)
+        fig_obj.savefig(path, dpi=dpi, bbox_inches='tight', facecolor='white', pad_inches=0.2)
         plt.close(fig_obj)
         img = Image.open(path)
         w, h = img.size
         if w > max_px or h > max_px:
             ratio = min(max_px / w, max_px / h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-            img.save(path)
-            log(f"  Resized {w}x{h} -> {img.size}")
+            new_w, new_h = int(w * ratio), int(h * ratio)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            img.save(path, quality=95)
+            log(f"  Resized {w}x{h} -> {new_w}x{new_h}")
+        return w, h
 
     # ---- Render overview ----
     log("Rendering overview...")
     t0 = time.time()
-    fig_h = 10
+    fig_h = 12  # taller for better quality
     fig_w = min(fig_h * aspect, 120)
     fig, ax = plt.subplots(1, 1, figsize=(max(fig_w, 6), fig_h))
     ax.set_facecolor('white'); ax.set_aspect('equal'); ax.axis('off')
     ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-    batch_render(ax)
+    batch_render(ax, lw=0.2)  # slightly thinner for overview
     overview_path = os.path.join(output_dir, 'overview.png')
-    save_image(fig, overview_path)
+    save_image(fig, overview_path, max_px=6000, dpi=250)
     render_time = time.time() - t0
     log(f"Overview: {os.path.getsize(overview_path)//1024}KB in {render_time:.1f}s")
 
@@ -157,7 +159,7 @@ def analyze(dxf_path, output_dir):
 
         sections = []
         sec_start = xmin
-        min_w = width * 0.03  # minimum 3% of total width
+        min_w = width * 0.05  # minimum 5% of total width (was 3%)
 
         for idx in gap_indices:
             gap_x = float((edges[idx] + edges[idx + 1]) / 2)
@@ -167,33 +169,53 @@ def analyze(dxf_path, output_dir):
         if xmax - sec_start > min_w:
             sections.append((sec_start, xmax))
 
-        log(f"Found {len(sections)} sections")
+        log(f"Found {len(sections)} raw sections")
+
+        # Merge adjacent small sections (gaps < 2% of width)
+        merged_sections = []
+        for sx0, sx1 in sections:
+            if merged_sections and (sx0 - merged_sections[-1][1]) < width * 0.02:
+                # Gap too small — merge with previous
+                merged_sections[-1] = (merged_sections[-1][0], sx1)
+            else:
+                merged_sections.append((sx0, sx1))
+        sections = merged_sections
+        log(f"After merging: {len(sections)} sections")
 
         for i, (sx0, sx1) in enumerate(sections):
             sw = sx1 - sx0
             sa = sw / max(height, 1)
-            sf_h = 15
-            sf_w = max(sf_h * sa, 4)
+            sf_h = 18  # taller for more detail (was 15)
+            sf_w = max(sf_h * sa, 5)  # minimum 5 inches wide (was 4)
 
             fig, ax = plt.subplots(1, 1, figsize=(sf_w, sf_h))
             ax.set_facecolor('white'); ax.set_aspect('equal'); ax.axis('off')
             ax.set_xlim(sx0, sx1); ax.set_ylim(ymin, ymax)
-            # Use thicker lines for section detail
+
+            # Use thicker lines so they're visible in compressed images
+            lw = 0.3  # was 0.2
             if line_xs:
-                ax.plot(line_xs, line_ys, color='black', linewidth=0.2)
+                ax.plot(line_xs, line_ys, color='black', linewidth=lw, solid_capstyle='round')
             if poly_xs:
-                ax.plot(poly_xs, poly_ys, color='black', linewidth=0.2)
+                ax.plot(poly_xs, poly_ys, color='black', linewidth=lw, solid_capstyle='round')
 
             zpath = os.path.join(output_dir, f'zone_{i}.png')
-            save_image(fig, zpath)
+            img_w, img_h = save_image(fig, zpath, max_px=5000, dpi=300)
 
+            size_kb = os.path.getsize(zpath) // 1024
             zones.append({
                 'zone_id': i,
                 'image_path': zpath,
                 'bounds': {'x_min': sx0, 'x_max': sx1, 'y_min': ymin, 'y_max': ymax},
-                'size_kb': os.path.getsize(zpath) // 1024
+                'size_kb': size_kb,
+                'dimensions': [img_w, img_h]
             })
-            log(f"  Section {i}: X[{sx0:.0f}-{sx1:.0f}] {zones[-1]['size_kb']}KB")
+
+            # Warn if section is suspiciously small (probably blank)
+            if size_kb < 50:
+                log(f"  ⚠️ Section {i}: X[{sx0:.0f}-{sx1:.0f}] {img_w}x{img_h} -> {size_kb}KB — LIKELY BLANK!")
+            else:
+                log(f"  Section {i}: X[{sx0:.0f}-{sx1:.0f}] {img_w}x{img_h} -> {size_kb}KB")
 
     else:
         # ============================================
@@ -211,21 +233,24 @@ def analyze(dxf_path, output_dir):
                 zx1 = zx0 + zw
                 zy1 = zy0 + zh
 
-                fig, ax = plt.subplots(1, 1, figsize=(15, 15))
+                fig, ax = plt.subplots(1, 1, figsize=(16, 16))  # was 15
                 ax.set_facecolor('white'); ax.set_aspect('equal'); ax.axis('off')
                 ax.set_xlim(zx0, zx1); ax.set_ylim(zy0, zy1)
-                batch_render(ax)
+                batch_render(ax, lw=0.3)  # thicker lines
 
                 zone_idx = row * 3 + col
                 zpath = os.path.join(output_dir, f'zone_{zone_idx}.png')
-                save_image(fig, zpath)
+                img_w, img_h = save_image(fig, zpath, max_px=5000, dpi=300)
 
+                size_kb = os.path.getsize(zpath) // 1024
                 zones.append({
                     'zone_id': zone_idx,
                     'image_path': zpath,
                     'bounds': {'x_min': zx0, 'x_max': zx1, 'y_min': zy0, 'y_max': zy1},
-                    'size_kb': os.path.getsize(zpath) // 1024
+                    'size_kb': size_kb,
+                    'dimensions': [img_w, img_h]
                 })
+                log(f"  Zone {zone_idx}: {size_kb}KB")
 
     total_time = time.time() - start
     log(f"Done in {total_time:.1f}s — {len(zones)} zones")
@@ -233,7 +258,7 @@ def analyze(dxf_path, output_dir):
     # ---- OUTPUT (only JSON on stdout) ----
     result = {
         'success': True,
-        'version': 'analyze_dxf v8',
+        'version': 'analyze_dxf v8.1',
         'is_flattened': is_flattened,
         'total_entities': total,
         'entity_counts': counts,
