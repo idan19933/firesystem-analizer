@@ -1346,20 +1346,274 @@ async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
 // ===== HYBRID SPATIAL ANALYSIS (v7) =====
 
 /**
+ * Use AI to classify unknown block names into fire safety categories
+ * This runs ONCE before zone analysis to build a classification map
+ */
+async function classifyBlockNamesWithAI(allBlockNames) {
+  if (!ANTHROPIC_API_KEY || allBlockNames.length === 0) {
+    return {};
+  }
+
+  console.log(`🧠 Classifying ${allBlockNames.length} unique block names with AI...`);
+
+  // Create a prompt for block classification
+  const blockList = allBlockNames.slice(0, 100).join('\n'); // Limit to 100
+
+  const prompt = `אתה מומחה בטיחות אש. סווג את שמות הבלוקים הבאים מתוכנית DXF לקטגוריות בטיחות אש.
+
+שמות הבלוקים:
+${blockList}
+
+סווג כל שם לאחת מהקטגוריות הבאות:
+- SPRINKLER (ספרינקלר, ראש ממטרה)
+- SMOKE_DETECTOR (גלאי עשן)
+- HEAT_DETECTOR (גלאי חום)
+- FIRE_EXTINGUISHER (מטף כיבוי)
+- HYDRANT (הידרנט, ברז כיבוי)
+- FIRE_DOOR (דלת אש)
+- EXIT (יציאת חירום)
+- STAIRS (מדרגות, חדר מדרגות מוגן)
+- FIRE_WALL (קיר אש)
+- FIRE_HOSE_REEL (גלגלון כיבוי)
+- NOT_FIRE_SAFETY (לא קשור לבטיחות אש)
+
+החזר JSON בלבד:
+{
+  "classifications": {
+    "BLOCK_NAME_1": "SPRINKLER",
+    "BLOCK_NAME_2": "NOT_FIRE_SAFETY",
+    ...
+  }
+}`;
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4000,
+        messages: [{
+          role: 'user',
+          content: prompt
+        }]
+      })
+    });
+
+    if (!resp.ok) {
+      console.log('⚠️ Block classification API error');
+      return {};
+    }
+
+    const data = await resp.json();
+    const content = data.content[0].text;
+
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      console.log(`✓ Classified ${Object.keys(parsed.classifications || {}).length} block names`);
+      return parsed.classifications || {};
+    }
+  } catch (err) {
+    console.log(`⚠️ Block classification error: ${err.message}`);
+  }
+
+  return {};
+}
+
+/**
+ * Apply AI classifications to entities
+ */
+function applyClassificationsToEntities(entities, classifications) {
+  return entities.map(entity => {
+    if (entity.type === 'BLOCK' && entity.name) {
+      const classification = classifications[entity.name];
+      if (classification && classification !== 'NOT_FIRE_SAFETY') {
+        return {
+          ...entity,
+          classifiedType: classification,
+          originalName: entity.name
+        };
+      }
+    }
+    return entity;
+  });
+}
+
+/**
+ * Count entities by their classified types
+ */
+function countClassifiedEntities(entities) {
+  const counts = {
+    sprinklers: 0,
+    smokeDetectors: 0,
+    heatDetectors: 0,
+    fireExtinguishers: 0,
+    hydrants: 0,
+    fireDoors: 0,
+    exits: 0,
+    stairs: 0,
+    fireWalls: 0,
+    fireHoseReels: 0
+  };
+
+  const typeMapping = {
+    'SPRINKLER': 'sprinklers',
+    'SMOKE_DETECTOR': 'smokeDetectors',
+    'HEAT_DETECTOR': 'heatDetectors',
+    'FIRE_EXTINGUISHER': 'fireExtinguishers',
+    'HYDRANT': 'hydrants',
+    'FIRE_DOOR': 'fireDoors',
+    'EXIT': 'exits',
+    'STAIRS': 'stairs',
+    'FIRE_WALL': 'fireWalls',
+    'FIRE_HOSE_REEL': 'fireHoseReels'
+  };
+
+  for (const entity of entities) {
+    if (entity.classifiedType && typeMapping[entity.classifiedType]) {
+      counts[typeMapping[entity.classifiedType]]++;
+    }
+  }
+
+  return counts;
+}
+
+/**
  * Build a hybrid prompt for a single zone with entity data
  */
-function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
-  const entitySummary = (zone.entities || []).map(e => {
-    if (e.type === 'TEXT' || e.type === 'MTEXT') {
-      return `- טקסט "${e.text}" בפיקסל (${e.pixel_pos[0]}, ${e.pixel_pos[1]})`;
-    } else if (e.type === 'BLOCK') {
-      return `- בלוק "${e.name}" בפיקסל (${e.pixel_pos[0]}, ${e.pixel_pos[1]})`;
+/**
+ * Categorize blocks by their likely fire safety type based on name patterns
+ */
+function categorizeBlocksByName(entities) {
+  const patterns = {
+    sprinklers: /sprink|ספרינק|sp_|_sp|^sp$|spk|sprk|sprin/i,
+    smokeDetectors: /smoke|עשן|sd_|_sd|^sd$|smk|detector.*smoke|גלאי.*עשן/i,
+    heatDetectors: /heat|חום|hd_|_hd|^hd$|thermal|גלאי.*חום/i,
+    fireExtinguishers: /extinguish|מטף|fe_|_fe|^fe$|ext|כיבוי|fire.*ext/i,
+    hydrants: /hydrant|הידרנט|hy_|_hy|^hy$|fh_|fire.*hydrant|ברז.*כיבוי/i,
+    fireDoors: /door.*fire|fire.*door|דלת.*אש|fd_|_fd|^fd$|f\.door/i,
+    exits: /exit|יציאה|ex_|_ex|^ex$|emergency.*exit|יציאת.*חירום|evac/i,
+    stairs: /stair|מדרג|st_|_st|^st$|escape.*stair|מדרגות/i,
+    fireWalls: /wall.*fire|fire.*wall|קיר.*אש|fw_|_fw|^fw$|f\.wall/i,
+    fireHoseReels: /hose|גלגלון|hr_|_hr|^hr$|reel|fire.*hose/i
+  };
+
+  const categorized = {
+    sprinklers: [],
+    smokeDetectors: [],
+    heatDetectors: [],
+    fireExtinguishers: [],
+    hydrants: [],
+    fireDoors: [],
+    exits: [],
+    stairs: [],
+    fireWalls: [],
+    fireHoseReels: [],
+    unknown: []
+  };
+
+  for (const entity of entities || []) {
+    if (entity.type !== 'BLOCK') continue;
+    const name = entity.name || '';
+    let matched = false;
+
+    for (const [category, pattern] of Object.entries(patterns)) {
+      if (pattern.test(name)) {
+        categorized[category].push(entity);
+        matched = true;
+        break;
+      }
     }
-    return null;
-  }).filter(Boolean).join('\n');
+
+    if (!matched) {
+      categorized.unknown.push(entity);
+    }
+  }
+
+  return categorized;
+}
+
+function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
+  // Group entities by AI-classified type (prioritize AI classification over regex)
+  const classifiedGroups = {
+    SPRINKLER: [],
+    SMOKE_DETECTOR: [],
+    HEAT_DETECTOR: [],
+    FIRE_EXTINGUISHER: [],
+    HYDRANT: [],
+    FIRE_DOOR: [],
+    EXIT: [],
+    STAIRS: [],
+    FIRE_WALL: [],
+    FIRE_HOSE_REEL: [],
+    unclassified: []
+  };
+
+  const typeLabels = {
+    SPRINKLER: { icon: '💧', label: 'ספרינקלרים' },
+    SMOKE_DETECTOR: { icon: '🔔', label: 'גלאי עשן' },
+    HEAT_DETECTOR: { icon: '🌡️', label: 'גלאי חום' },
+    FIRE_EXTINGUISHER: { icon: '🧯', label: 'מטפי כיבוי' },
+    HYDRANT: { icon: '🔴', label: 'הידרנטים' },
+    FIRE_DOOR: { icon: '🚪', label: 'דלתות אש' },
+    EXIT: { icon: '🚶', label: 'יציאות חירום' },
+    STAIRS: { icon: '🪜', label: 'מדרגות' },
+    FIRE_WALL: { icon: '🧱', label: 'קירות אש' },
+    FIRE_HOSE_REEL: { icon: '🔥', label: 'גלגלוני כיבוי' }
+  };
+
+  // Group blocks by their AI classification
+  for (const entity of zone.entities || []) {
+    if (entity.type === 'BLOCK') {
+      if (entity.classifiedType && classifiedGroups[entity.classifiedType]) {
+        classifiedGroups[entity.classifiedType].push(entity);
+      } else {
+        classifiedGroups.unclassified.push(entity);
+      }
+    }
+  }
+
+  // Build classified summary
+  const classifiedSummary = [];
+  for (const [type, entities] of Object.entries(classifiedGroups)) {
+    if (type === 'unclassified' || entities.length === 0) continue;
+    const { icon, label } = typeLabels[type];
+    const locations = entities.slice(0, 10).map(e => `"${e.originalName || e.name}"@(${e.pixel_pos[0]},${e.pixel_pos[1]})`).join(', ');
+    classifiedSummary.push(`${icon} ${label} (${entities.length}): ${locations}${entities.length > 10 ? '...' : ''}`);
+  }
+
+  // Unclassified blocks
+  if (classifiedGroups.unclassified.length > 0) {
+    const unclList = classifiedGroups.unclassified.slice(0, 15).map(e => `"${e.name}"`).join(', ');
+    classifiedSummary.push(`❓ בלוקים לא מסווגים (${classifiedGroups.unclassified.length}): ${unclList}${classifiedGroups.unclassified.length > 15 ? '...' : ''}`);
+  }
+
+  // Extract texts
+  const texts = (zone.entities || [])
+    .filter(e => e.type === 'TEXT' || e.type === 'MTEXT')
+    .map(e => `- "${e.text}" @ (${e.pixel_pos[0]}, ${e.pixel_pos[1]})`);
+
+  // Pre-count from AI classifications
+  const preCount = {
+    sprinklers: classifiedGroups.SPRINKLER.length,
+    smokeDetectors: classifiedGroups.SMOKE_DETECTOR.length,
+    heatDetectors: classifiedGroups.HEAT_DETECTOR.length,
+    fireExtinguishers: classifiedGroups.FIRE_EXTINGUISHER.length,
+    hydrants: classifiedGroups.HYDRANT.length,
+    fireDoors: classifiedGroups.FIRE_DOOR.length,
+    exits: classifiedGroups.EXIT.length,
+    stairs: classifiedGroups.STAIRS.length,
+    fireWalls: classifiedGroups.FIRE_WALL.length,
+    fireHoseReels: classifiedGroups.FIRE_HOSE_REEL.length
+  };
 
   const basePrompt = analysisType === 'fire-safety' ?
-    `אתה מומחה בטיחות אש ישראלי. נתח את אזור ${zone.zone_id} של התוכנית.` :
+    `אתה מומחה בטיחות אש ישראלי. נתח את אזור ${zone.zone_id} של תוכנית כיבוי אש.` :
     `אתה בודק היתרי בנייה ישראלי. בדוק את אזור ${zone.zone_id} של התוכנית.`;
 
   return `${basePrompt}
@@ -1367,24 +1621,27 @@ function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
 מיקום באזור: שורה ${zone.grid_position[0]}, עמודה ${zone.grid_position[1]}
 גודל תמונה: ${zone.image_size[0]}x${zone.image_size[1]} פיקסלים
 
-=== טקסטים וסמלים באזור זה (עם קואורדינטות פיקסל) ===
-${entitySummary || '(אין טקסט/בלוקים באזור זה)'}
+=== אלמנטי בטיחות אש (מסווגים על ידי AI) ===
+${classifiedSummary.length > 0 ? classifiedSummary.join('\n') : '(לא נמצאו אלמנטי בטיחות באזור זה)'}
+
+=== טקסטים באזור ===
+${texts.length > 0 ? texts.slice(0, 30).join('\n') : '(אין טקסט)'}
+
+=== ספירה מקדימה (לפי סיווג AI של שמות בלוקים) ===
+💧 ספרינקלרים: ${preCount.sprinklers} | 🔔 גלאי עשן: ${preCount.smokeDetectors} | 🌡️ גלאי חום: ${preCount.heatDetectors}
+🧯 מטפי כיבוי: ${preCount.fireExtinguishers} | 🔴 הידרנטים: ${preCount.hydrants} | 🚪 דלתות אש: ${preCount.fireDoors}
+🚶 יציאות חירום: ${preCount.exits} | 🪜 מדרגות: ${preCount.stairs} | 🧱 קירות אש: ${preCount.fireWalls}
 
 === משימת ניתוח ===
 ${analysisType === 'fire-safety' ? `
-ספור וזהה את כל האלמנטים הבאים באזור:
-1. ספרינקלרים (SPRINKLER) - ספור כמות, ציין מיקום כל אחד
-2. גלאי עשן (SMOKE_DETECTOR) - ספור כמות
-3. גלאי חום (HEAT_DETECTOR) - ספור כמות
-4. מטפי כיבוי (FIRE_EXTINGUISHER) - ספור כמות
-5. הידרנטים (HYDRANT) - ספור כמות
-6. דלתות אש (FIRE_DOOR) - ספור כמות, בדוק כיוון
-7. יציאות חירום (EXIT) - ספור כמות
-8. מדרגות (STAIRS) - ספור כמות
-9. קירות אש (FIRE_WALL) - זהה אם קיימים
-10. גלגלוני כיבוי (FIRE_HOSE_REEL) - ספור כמות
+הספירה למעלה מבוססת על סיווג AI של שמות בלוקים בקובץ DXF.
 
-כשאתה מדווח, כלול את קואורדינטות הפיקסל של כל אלמנט.
+1. **אמת את הספירה**: האם הספירה נכונה? בדוק ויזואלית בתמונה.
+2. **חפש אלמנטים נוספים**: האם יש סמלים בתמונה שלא נספרו?
+3. **הערך מיקום**: האם האלמנטים ממוקמים נכון לפי תקן ישראלי?
+4. **בדוק כיסוי**: האם יש אזורים ללא כיסוי נאות?
+
+חשוב: הספירה המקדימה כבר כוללת את הנתונים מהקובץ. המשימה שלך היא לאמת ולהשלים.
 ` : `
 בדוק את האזור עבור:
 1. מידות וכתות
@@ -1393,7 +1650,7 @@ ${analysisType === 'fire-safety' ? `
 4. בעיות פוטנציאליות
 `}
 
-החזר JSON:
+החזר JSON (עדכן את הספירה בהתאם לניתוח הויזואלי והבלוקים):
 {
   "zone_id": "${zone.zone_id}",
   "objectCounts": {
@@ -1788,8 +2045,38 @@ async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety',
 
   console.log(`🤖 Starting hybrid spatial analysis (${hybridData.total_zones} zones)...`);
 
-  // Process zones concurrently (2-3 at a time to balance speed and rate limits)
-  const zoneResults = await processZonesConcurrently(hybridData.zones, analysisType, 2);
+  // STEP 1: Collect all unique block names from all zones
+  const allBlockNames = new Set();
+  for (const zone of hybridData.zones) {
+    for (const entity of zone.entities || []) {
+      if (entity.type === 'BLOCK' && entity.name) {
+        allBlockNames.add(entity.name);
+      }
+    }
+  }
+
+  console.log(`📦 Found ${allBlockNames.size} unique block names`);
+
+  // STEP 2: Classify block names with AI
+  const blockClassifications = await classifyBlockNamesWithAI([...allBlockNames]);
+
+  // STEP 3: Apply classifications to all entities in all zones
+  const classifiedZones = hybridData.zones.map(zone => ({
+    ...zone,
+    entities: applyClassificationsToEntities(zone.entities || [], blockClassifications)
+  }));
+
+  // Log classification results
+  const classifiedCount = Object.values(blockClassifications).filter(v => v !== 'NOT_FIRE_SAFETY').length;
+  console.log(`🏷️ AI classified ${classifiedCount}/${allBlockNames.size} blocks as fire safety elements`);
+
+  // Count total fire safety elements from classifications
+  const allClassifiedEntities = classifiedZones.flatMap(z => z.entities);
+  const preCounts = countClassifiedEntities(allClassifiedEntities);
+  console.log(`📊 Pre-counted from blocks: ${preCounts.sprinklers} sprinklers, ${preCounts.smokeDetectors} smoke, ${preCounts.fireExtinguishers} extinguishers, ${preCounts.exits} exits`);
+
+  // STEP 4: Process zones concurrently with classified entities
+  const zoneResults = await processZonesConcurrently(classifiedZones, analysisType, 2);
 
   // Aggregate results
   const aggregated = aggregateZoneResults(zoneResults, hybridData.global_bounds);
@@ -1800,6 +2087,12 @@ async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety',
   console.log(`   Objects detected: ${counts.sprinklers} sprinklers, ${counts.smokeDetectors} smoke detectors, ${counts.fireExtinguishers} extinguishers`);
 
   // Format for fire safety output
+  // Use the higher of AI pre-counts or Claude-detected counts (AI is more reliable for block-based counts)
+  const finalObjectCounts = {};
+  for (const key of Object.keys(preCounts)) {
+    finalObjectCounts[key] = Math.max(preCounts[key] || 0, aggregated.objectCounts[key] || 0);
+  }
+
   return {
     overallScore: aggregated.overallScore,
     status: aggregated.status,
@@ -1811,9 +2104,12 @@ async function analyzeWithClaudeHybrid(hybridData, analysisType = 'fire-safety',
     detailedReport: generateDetailedReport(aggregated),
     hybridAnalysis: true,
     zonesAnalyzed: aggregated.totalZonesAnalyzed,
-    // NEW: Object counts and locations
-    objectCounts: aggregated.objectCounts,
+    // Object counts: use the higher of AI pre-count or Claude count
+    objectCounts: finalObjectCounts,
+    aiPreCounts: preCounts,  // Pre-counts from AI block classification
+    claudeCounts: aggregated.objectCounts,  // Counts from Claude vision
     detectedObjects: aggregated.detectedObjects,
+    blockClassifications: blockClassifications,  // Include the AI classifications
     rawZoneResults: zoneResults
   };
 }

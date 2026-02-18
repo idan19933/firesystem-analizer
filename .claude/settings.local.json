@@ -9,7 +9,16 @@
       "Bash(cat:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(curl:*)",
+      "Bash(where railway:*)",
+      "Bash(railway status:*)",
+      "Bash(railway link:*)",
+      "Bash(npm search:*)",
+      "WebSearch",
+      "Bash(npx firebase deploy:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(node --check:*)"
     ]
   }
 }
