@@ -659,6 +659,192 @@ async function captureHighResScreenshot(token, urn, outputPath) {
   }
 }
 
+// ===== APS+HYBRID: Render with APS, extract entities with Python =====
+/**
+ * Combines APS high-quality rendering with Python entity extraction
+ * for best fire safety analysis results
+ */
+async function renderDXFWithAPSHybrid(dxfPath, outputDir) {
+  if (!APS_CLIENT_ID || !APS_CLIENT_SECRET || !puppeteer) {
+    console.log('⚠️ APS+Hybrid not available (missing credentials or Puppeteer)');
+    return null;
+  }
+
+  console.log('🎯 Using APS+Hybrid Pipeline (APS images + Python entity data)');
+
+  try {
+    // STEP 1: Run Python FIRST to extract entity data (no rendering needed, but we get it anyway)
+    console.log('📊 Step 1: Extracting entity data with Python...');
+    const pythonResult = await renderDXFWithPython(dxfPath, outputDir);
+
+    if (!pythonResult || !pythonResult.hybridData) {
+      console.log('⚠️ Python entity extraction failed, falling back to Python-only rendering');
+      return pythonResult;
+    }
+
+    const hybridData = pythonResult.hybridData;
+    console.log(`   Extracted ${hybridData.zones?.length || 0} zones with entity data`);
+    console.log(`   Total entities: ${hybridData.zones?.reduce((sum, z) => sum + (z.entity_count || 0), 0) || 0}`);
+
+    // STEP 2: Upload DXF to APS and capture high-res screenshot
+    console.log('📤 Step 2: Uploading to APS for high-res rendering...');
+    const token = await getAPSToken();
+    const bucketKey = await ensureBucket(token);
+    const originalName = path.basename(dxfPath);
+    const urn = await uploadToAPS(token, bucketKey, dxfPath, originalName);
+
+    console.log('🔄 Step 3: Translating to SVF2...');
+    await translateToSVF2(token, urn);
+
+    // Get fresh token for viewer
+    const viewerToken = await getAPSToken();
+
+    // Capture full high-res screenshot
+    console.log('📸 Step 4: Capturing high-res screenshot with APS Viewer...');
+    const fullScreenshotPath = path.join(outputDir, 'aps_full.png');
+    const apsImage = await captureHighResScreenshot(viewerToken, urn, fullScreenshotPath);
+
+    if (!apsImage) {
+      console.log('⚠️ APS screenshot failed, using Python-rendered image');
+      return pythonResult;
+    }
+
+    // STEP 3: Split APS image into zones matching Python's zone bounds
+    console.log('🔲 Step 5: Splitting APS image into hybrid zones...');
+    const apsZones = await splitAPSImageIntoHybridZones(apsImage, hybridData, outputDir);
+
+    if (!apsZones || apsZones.length === 0) {
+      console.log('⚠️ APS zone splitting failed, using Python zones');
+      return pythonResult;
+    }
+
+    // STEP 4: Replace Python zone images with APS zone images
+    console.log('🔗 Step 6: Combining APS images with Python entity data...');
+    for (let i = 0; i < hybridData.zones.length && i < apsZones.length; i++) {
+      const apsZonePath = apsZones[i];
+      if (fs.existsSync(apsZonePath)) {
+        // Update zone image path to APS version
+        hybridData.zones[i].image_path = apsZonePath;
+        hybridData.zones[i].rendered_by = 'APS';
+
+        // Update image size from actual APS zone
+        try {
+          const apsZoneBuffer = fs.readFileSync(apsZonePath);
+          const dimensions = await getImageDimensions(apsZoneBuffer);
+          if (dimensions) {
+            hybridData.zones[i].image_size = [dimensions.width, dimensions.height];
+          }
+        } catch (e) {}
+      }
+    }
+
+    // Update overview to APS version
+    hybridData.overview = fullScreenshotPath;
+    hybridData.rendered_by = 'APS';
+
+    console.log(`✅ APS+Hybrid complete: ${apsZones.length} APS zones with Python entity data`);
+
+    return {
+      buffer: apsImage,
+      overview: fullScreenshotPath,
+      zones: apsZones,
+      metadata: pythonResult.metadata,
+      outputDir: outputDir,
+      hybridData: hybridData,
+      version: 'v8-aps-hybrid',
+      apsRendered: true
+    };
+
+  } catch (error) {
+    console.log(`⚠️ APS+Hybrid failed: ${error.message}`);
+    // Fallback to Python-only rendering
+    return await renderDXFWithPython(dxfPath, outputDir);
+  }
+}
+
+/**
+ * Split APS full image into zones matching Python's zone grid
+ */
+async function splitAPSImageIntoHybridZones(fullImage, hybridData, outputDir) {
+  if (!sharp) {
+    console.log('⚠️ Sharp not available for zone splitting');
+    return null;
+  }
+
+  const zones = hybridData.zones || [];
+  if (zones.length === 0) return [];
+
+  const globalBounds = hybridData.global_bounds; // [xmin, xmax, ymin, ymax]
+  const xmin = globalBounds[0], xmax = globalBounds[1];
+  const ymin = globalBounds[2], ymax = globalBounds[3];
+  const worldWidth = xmax - xmin;
+  const worldHeight = ymax - ymin;
+
+  // Get APS image dimensions
+  const metadata = await sharp(fullImage).metadata();
+  const imgWidth = metadata.width;
+  const imgHeight = metadata.height;
+
+  console.log(`   APS image: ${imgWidth}x${imgHeight}, World: ${worldWidth.toFixed(0)}x${worldHeight.toFixed(0)}`);
+
+  const apsZonePaths = [];
+
+  for (const zone of zones) {
+    const zoneBounds = zone.bounds; // [zxmin, zxmax, zymin, zymax]
+    const zxmin = zoneBounds[0], zxmax = zoneBounds[1];
+    const zymin = zoneBounds[2], zymax = zoneBounds[3];
+
+    // Convert world coordinates to pixel coordinates
+    // Note: Y is flipped in image space
+    const pxLeft = Math.round(((zxmin - xmin) / worldWidth) * imgWidth);
+    const pxRight = Math.round(((zxmax - xmin) / worldWidth) * imgWidth);
+    const pxTop = Math.round(((ymax - zymax) / worldHeight) * imgHeight);
+    const pxBottom = Math.round(((ymax - zymin) / worldHeight) * imgHeight);
+
+    const cropWidth = Math.max(1, pxRight - pxLeft);
+    const cropHeight = Math.max(1, pxBottom - pxTop);
+
+    // Clamp to image bounds
+    const left = Math.max(0, Math.min(pxLeft, imgWidth - 1));
+    const top = Math.max(0, Math.min(pxTop, imgHeight - 1));
+    const width = Math.min(cropWidth, imgWidth - left);
+    const height = Math.min(cropHeight, imgHeight - top);
+
+    if (width < 10 || height < 10) {
+      console.log(`   Skipping ${zone.zone_id}: too small (${width}x${height})`);
+      continue;
+    }
+
+    try {
+      const zonePath = path.join(outputDir, `aps_${zone.zone_id}.jpg`);
+      await sharp(fullImage)
+        .extract({ left, top, width, height })
+        .jpeg({ quality: 90 })
+        .toFile(zonePath);
+
+      apsZonePaths.push(zonePath);
+      console.log(`   ${zone.zone_id}: ${width}x${height}px @ (${left},${top})`);
+    } catch (e) {
+      console.log(`   Failed to extract ${zone.zone_id}: ${e.message}`);
+    }
+  }
+
+  return apsZonePaths;
+}
+
+/**
+ * Get image dimensions using sharp
+ */
+async function getImageDimensions(buffer) {
+  if (!sharp) return null;
+  try {
+    const metadata = await sharp(buffer).metadata();
+    return { width: metadata.width, height: metadata.height };
+  } catch (e) {
+    return null;
+  }
+}
+
 // ===== CONVERT DWG TO DXF =====
 async function convertDWGtoDXF(dwgPath) {
   const baseName = path.basename(dwgPath, path.extname(dwgPath));
@@ -3006,12 +3192,28 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
       };
     }
 
-    // ===== DXF: Direct parsing with Python rendering =====
+    // ===== DXF: Direct parsing with Python rendering (or APS+Hybrid if available) =====
     else if (ext === '.dxf') {
-      console.log('📐 Using DXF parsing pipeline with Python rendering');
+      let pythonResult;
+      const outputDir = path.join(tmpDir, `dxf-fire-${Date.now()}`);
 
-      // Try Python renderer for visual analysis
-      const pythonResult = await renderDXFWithPython(filePath, path.join(tmpDir, `dxf-fire-${Date.now()}`));
+      // Try APS+Hybrid first if APS is configured (higher quality rendering)
+      if (APS_CLIENT_ID && puppeteer && sharp) {
+        console.log('🎯 APS available - trying APS+Hybrid pipeline for best quality');
+        pythonResult = await renderDXFWithAPSHybrid(filePath, outputDir);
+
+        if (pythonResult && pythonResult.apsRendered) {
+          console.log('✅ Using APS-rendered images with Python entity data');
+        } else {
+          console.log('⚠️ APS+Hybrid failed, using Python-only rendering');
+        }
+      }
+
+      // Fallback to Python-only rendering
+      if (!pythonResult || !pythonResult.buffer) {
+        console.log('📐 Using DXF parsing pipeline with Python rendering');
+        pythonResult = await renderDXFWithPython(filePath, outputDir);
+      }
 
       if (pythonResult && pythonResult.buffer) {
         console.log('✅ Using Python-rendered image for Vision analysis');
@@ -3057,8 +3259,14 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
             }
           }
 
+          // Determine method name based on rendering source
+          const isAPSRendered = pythonResult.apsRendered || pythonResult.hybridData?.rendered_by === 'APS';
+          const methodName = isAPSRendered
+            ? 'APS+Hybrid Spatial Analysis (v8)'
+            : 'DXF Hybrid Spatial Analysis (v7)';
+
           analysisData = {
-            method: 'DXF Hybrid Spatial Analysis (v7)',
+            method: methodName,
             screenshotUrl,
             zones: pythonResult.hybridData.total_zones,
             imagesAnalyzed: pythonResult.hybridData.total_zones,
@@ -3066,6 +3274,7 @@ app.post('/api/analyze', upload.single('dwgFile'), async (req, res) => {
             entities: pythonResult.metadata?.total_entities || 'unknown',
             layers: pythonResult.metadata?.layer_count || 'unknown',
             hybridAnalysis: true,
+            apsRendered: isAPSRendered,
             // Include hybrid zone data with entities
             hybridZones: hybridZonesForResponse,
             globalBounds: pythonResult.hybridData.global_bounds
