@@ -55,6 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
     chromium \
+    # OpenGL/Mesa for software WebGL rendering (SwiftShader)
+    libegl1-mesa \
+    libgl1-mesa-dri \
+    libgl1-mesa-glx \
+    mesa-utils \
+    libosmesa6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages for DXF rendering

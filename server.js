@@ -449,12 +449,15 @@ async function captureHighResScreenshot(token, urn, outputPath) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      // Enable WebGL with software rendering for APS Viewer
+      // Enable WebGL with ANGLE/SwiftShader for headless environments
       '--enable-webgl',
-      '--use-gl=swiftshader',
-      '--enable-webgl-software-rendering',
+      '--enable-webgl2',
+      '--use-gl=angle',
+      '--use-angle=swiftshader-webgl',
+      '--enable-unsafe-swiftshader',
       '--ignore-gpu-blocklist',
-      '--disable-software-rasterizer',
+      '--disable-accelerated-2d-canvas',
+      '--deterministic-mode',
       '--window-size=4096,4096'
     ]
   });
