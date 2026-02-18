@@ -1112,18 +1112,18 @@ async function renderDXFWithPython(dxfPath, outputDir) {
   fs.mkdirSync(outputPath, { recursive: true });
 
   try {
-    // Run Python script with JSON output
-    const cmd = `${pythonCmd} "${pythonScript}" "${dxfPath}" --output "${outputPath}" --dpi 200 --json`;
+    // Run Python script v8 - simpler CLI: just dxf_path and output_dir
+    const cmd = `${pythonCmd} "${pythonScript}" "${dxfPath}" "${outputPath}"`;
     console.log(`   Running: ${pythonCmd} analyze_dxf.py ...`);
 
     const result = execSync(cmd, {
-      timeout: 300000,  // 5 minute timeout for large files
+      timeout: 600000,  // 10 minute timeout for very large files (1M+ entities)
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       maxBuffer: 50 * 1024 * 1024  // 50MB buffer
     });
 
-    // Parse JSON output - extract JSON from output in case any log messages leaked through
+    // Parse JSON output - extract JSON from output (stderr has logs, stdout has JSON only)
     let jsonResult;
     const trimmed = result.trim();
     const jsonStart = trimmed.indexOf('{');
@@ -1138,68 +1138,98 @@ async function renderDXFWithPython(dxfPath, outputDir) {
     }
 
     if (!jsonResult.success) {
-      console.log('⚠️ Python render reported failure');
+      console.log('⚠️ Python render reported failure:', jsonResult.error);
       return null;
     }
 
-    console.log(`✅ Python render complete in ${jsonResult.processing_time}s`);
-    console.log(`   Version: ${jsonResult.version || 'legacy'}`);
-    console.log(`   Entities: ${jsonResult.metadata?.total_entities || 'unknown'}`);
-    console.log(`   Overview: ${jsonResult.overview}`);
-    console.log(`   Zones: ${jsonResult.zones?.length || 0}`);
+    // v8 output format
+    console.log(`✅ Python render complete in ${jsonResult.timing?.total || 0}s`);
+    console.log(`   Version: ${jsonResult.version || 'unknown'}`);
+    console.log(`   Entities: ${jsonResult.total_entities || 'unknown'}`);
+    console.log(`   Aspect ratio: ${jsonResult.aspect_ratio || 'unknown'}:1`);
+    console.log(`   Split method: ${jsonResult.split_method || 'unknown'}`);
+    console.log(`   Is flattened: ${jsonResult.is_flattened || false}`);
+    console.log(`   Zones: ${jsonResult.total_zones || 0}`);
 
-    // Check for hybrid data (v7+) or sections mode (v8)
-    if (jsonResult.hybrid_data) {
-      console.log(`   Hybrid zones: ${jsonResult.hybrid_data.total_zones}`);
-      console.log(`   Entities extracted: ${jsonResult.total_entities_extracted || 0}`);
-    }
-    if (jsonResult.mode === 'sections') {
-      console.log(`   SECTION MODE: ${jsonResult.section_count} sections detected`);
-      console.log(`   Is flattened: ${jsonResult.is_flattened}`);
+    // v8 uses split_method instead of mode - handle section detection or wide layouts
+    const isWideLayout = jsonResult.aspect_ratio > 5;
+    const isSectionMode = jsonResult.split_method === 'section_detection' || isWideLayout;
+
+    if (isSectionMode) {
+      console.log(`   SECTION MODE: ${jsonResult.total_zones} sections detected (aspect ${jsonResult.aspect_ratio}:1)`);
     }
 
-    // For sections mode, return sections data
-    if (jsonResult.mode === 'sections' && jsonResult.sections) {
-      const sections = jsonResult.sections.map(sec => ({
-        sectionId: sec.section_id,
-        imagePath: sec.image_path,
-        bounds: sec.bounds,
+    // For v8 section detection mode (wide multi-sheet layouts)
+    if (isSectionMode && jsonResult.zones && jsonResult.zones.length > 0) {
+      const sections = jsonResult.zones.map(zone => ({
+        sectionId: zone.zone_id,
+        imagePath: zone.image_path,
+        bounds: zone.bounds,
         classification: null,  // To be filled by Claude
-        buffer: fs.existsSync(sec.image_path) ? fs.readFileSync(sec.image_path) : null
+        buffer: fs.existsSync(zone.image_path) ? fs.readFileSync(zone.image_path) : null,
+        sizeKb: zone.size_kb
       }));
 
       return {
         mode: 'sections',
-        isFlattened: jsonResult.is_flattened,
+        isFlattened: jsonResult.is_flattened || false,
         sections,
         totalEntities: jsonResult.total_entities,
         entityCounts: jsonResult.entity_counts,
-        layers: jsonResult.layers,
+        aspectRatio: jsonResult.aspect_ratio,
+        bounds: jsonResult.bounds,
+        overviewImage: jsonResult.overview_image,
         outputDir: outputPath,
-        version: jsonResult.version || 'v8-sections'
+        version: jsonResult.version || 'v8'
       };
     }
 
-    // Read the rendered image (hybrid mode)
-    const renderedPath = jsonResult.rendered_image || path.join(outputPath, 'rendered_plan.png');
-    if (fs.existsSync(renderedPath)) {
-      const imageBuffer = fs.readFileSync(renderedPath);
-      console.log(`   Image size: ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB`);
+    // v8: Read the overview image (3x3 grid mode or any mode)
+    const overviewPath = jsonResult.overview_image || path.join(outputPath, 'overview.png');
+    if (fs.existsSync(overviewPath)) {
+      const imageBuffer = fs.readFileSync(overviewPath);
+      console.log(`   Overview image size: ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB`);
+
+      // Build zones data from v8 format
+      const zones = (jsonResult.zones || []).map(zone => ({
+        zoneId: zone.zone_id,
+        imagePath: zone.image_path,
+        bounds: zone.bounds,
+        buffer: fs.existsSync(zone.image_path) ? fs.readFileSync(zone.image_path) : null,
+        sizeKb: zone.size_kb
+      }));
 
       return {
         buffer: imageBuffer,
-        overview: jsonResult.overview,
-        zones: jsonResult.zones,
-        allImages: jsonResult.all_images,
-        metadata: jsonResult.metadata,
+        overview: overviewPath,
+        zones: zones.map(z => z.imagePath),  // For legacy compatibility
+        zonesData: zones,  // Full zone data for v8
+        metadata: {
+          total_entities: jsonResult.total_entities,
+          entity_counts: jsonResult.entity_counts,
+          bounds: jsonResult.bounds,
+          aspect_ratio: jsonResult.aspect_ratio,
+          is_flattened: jsonResult.is_flattened
+        },
         outputDir: outputPath,
-        // NEW: Hybrid data for v7+
-        hybridData: jsonResult.hybrid_data || null,
-        hybridPath: jsonResult.hybrid_path || null,
-        version: jsonResult.version || 'legacy'
+        // v8 doesn't have hybrid_data, but we can build it for compatibility
+        hybridData: {
+          overview: overviewPath,
+          overview_size: null,
+          global_bounds: [jsonResult.bounds?.x_min, jsonResult.bounds?.x_max, jsonResult.bounds?.y_min, jsonResult.bounds?.y_max],
+          zones: zones.map(z => ({
+            zone_id: `zone_${z.zoneId}`,
+            image_path: z.imagePath,
+            bounds: z.bounds,
+            entities: [],  // v8 doesn't extract text entities
+            entity_count: 0
+          })),
+          total_zones: jsonResult.total_zones || zones.length
+        },
+        version: jsonResult.version || 'v8'
       };
     } else {
-      console.log('⚠️ Rendered image not found at:', renderedPath);
+      console.log('⚠️ Overview image not found at:', overviewPath);
       return null;
     }
 

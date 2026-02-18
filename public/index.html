@@ -492,6 +492,20 @@
       grid-template-columns: repeat(3, 1fr);
       gap: 8px;
     }
+    /* Sections mode - horizontal scroll for wide layouts */
+    .zones-grid.sections-mode {
+      display: flex;
+      overflow-x: auto;
+      gap: 12px;
+      padding: 10px 0;
+      scroll-snap-type: x mandatory;
+    }
+    .zones-grid.sections-mode .zone-item {
+      flex: 0 0 auto;
+      width: 280px;
+      aspect-ratio: auto;
+      scroll-snap-align: start;
+    }
     .zone-item {
       aspect-ratio: 1;
       border-radius: 8px;
@@ -1606,9 +1620,9 @@
         </div>
         <a href="" download="plan.png" class="download-btn" id="downloadBtn">📥 הורד תמונה</a>
 
-        <!-- Zones Grid -->
+        <!-- Zones Grid / Sections -->
         <div class="zones-container" id="zonesContainer" style="display:none">
-          <h4>🔍 אזורים מנותחים (רשת 3×3):</h4>
+          <h4 id="zonesTitle">🔍 אזורים מנותחים (רשת 3×3):</h4>
           <div class="zones-grid" id="zonesGrid"></div>
         </div>
       </div>
@@ -2505,9 +2519,39 @@
         const badges = document.getElementById('sourceBadges');
         const zonesContainer = document.getElementById('zonesContainer');
         const zonesGrid = document.getElementById('zonesGrid');
+        const zonesTitle = document.getElementById('zonesTitle');
 
-        if (data.screenshotUrl && data.screenshotId) {
-          // High-res screenshot from vision pipeline
+        // Check for sections mode (flattened DXF with wide aspect ratio)
+        const isFlattened = data.analysisData?.isFlattened || false;
+        const sectionCount = data.analysisData?.sectionCount || 0;
+        const sections = data.analysisData?.sections || [];
+
+        if (isFlattened && sectionCount > 0) {
+          // SECTIONS MODE - horizontal scroll for wide multi-sheet layouts
+          zonesContainer.style.display = 'block';
+          zonesTitle.textContent = `📐 ${sectionCount} גיליונות תכנית (גלול לצדדים):`;
+          zonesGrid.className = 'zones-grid sections-mode';
+          zonesGrid.innerHTML = '';
+
+          badges.innerHTML = '<span class="source-badge vector">DXF שטוח</span><span class="source-badge thumbnail">' + (data.analysisData?.entities || '1M+') + ' ישויות</span>';
+
+          for (let i = 0; i < sectionCount; i++) {
+            const zoneDiv = document.createElement('div');
+            zoneDiv.className = 'zone-item';
+            const sectionUrl = data.screenshotUrl ? data.screenshotUrl.replace('.png', `_section_${i}.png`) : '';
+            zoneDiv.innerHTML = `
+              <img src="${sectionUrl}" alt="Section ${i + 1}" style="height: 200px; object-fit: contain;">
+              <span class="zone-label">גיליון ${i + 1}</span>
+            `;
+            zoneDiv.onclick = function() {
+              openLightbox(sectionUrl);
+            };
+            zonesGrid.appendChild(zoneDiv);
+          }
+        } else if (data.screenshotUrl && data.screenshotId) {
+          // Standard 3x3 grid mode
+          zonesTitle.textContent = '🔍 אזורים מנותחים (רשת 3×3):';
+          zonesGrid.className = 'zones-grid';
           badges.innerHTML = '<span class="source-badge derivative">רזולוציה גבוהה</span><span class="source-badge thumbnail">4096×4096</span>';
 
           // Show zones grid
