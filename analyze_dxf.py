@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""analyze_dxf.py v8.1 — Batch render + section detection + higher quality output"""
+"""analyze_dxf.py v8.2 — Batch render + section detection + fixed crashes"""
 import sys, json, os, time
 
 def log(msg):
@@ -12,6 +12,7 @@ def analyze(dxf_path, output_dir):
     import matplotlib.pyplot as plt
     import numpy as np
     from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None  # Allow large renders (we generate these ourselves)
 
     start = time.time()
     os.makedirs(output_dir, exist_ok=True)
@@ -171,11 +172,12 @@ def analyze(dxf_path, output_dir):
 
         log(f"Found {len(sections)} raw sections")
 
-        # Merge adjacent small sections (gaps < 2% of width)
+        # Only merge if gap is truly negligible (< 5 units absolute)
+        # Previous logic used width*0.02 which was ~60 units and merged everything
         merged_sections = []
         for sx0, sx1 in sections:
-            if merged_sections and (sx0 - merged_sections[-1][1]) < width * 0.02:
-                # Gap too small — merge with previous
+            if merged_sections and (sx0 - merged_sections[-1][1]) < 5:
+                # Gap < 5 units — merge with previous
                 merged_sections[-1] = (merged_sections[-1][0], sx1)
             else:
                 merged_sections.append((sx0, sx1))
@@ -200,7 +202,7 @@ def analyze(dxf_path, output_dir):
                 ax.plot(poly_xs, poly_ys, color='black', linewidth=lw, solid_capstyle='round')
 
             zpath = os.path.join(output_dir, f'zone_{i}.png')
-            img_w, img_h = save_image(fig, zpath, max_px=5000, dpi=300)
+            img_w, img_h = save_image(fig, zpath, max_px=5000, dpi=200)  # 200 DPI to avoid huge images
 
             size_kb = os.path.getsize(zpath) // 1024
             zones.append({
@@ -258,7 +260,7 @@ def analyze(dxf_path, output_dir):
     # ---- OUTPUT (only JSON on stdout) ----
     result = {
         'success': True,
-        'version': 'analyze_dxf v8.1',
+        'version': 'analyze_dxf v8.2',
         'is_flattened': is_flattened,
         'total_entities': total,
         'entity_counts': counts,
