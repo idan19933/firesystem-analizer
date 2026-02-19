@@ -268,9 +268,21 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Results Section */
-    .results-section { display: none; animation: fadeIn 0.5s ease; }
-    .results-section.active { display: block; }
+    /* Results Section — smooth reveal without layout jumps */
+    .results-section { display: none; }
+    .results-section.active {
+      display: block;
+      animation: fadeInSmooth 0.6s ease forwards;
+    }
+    @keyframes fadeInSmooth {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    /* Result sub-sections: prevent individual layout jumps */
+    #methodBadgeWrap, #vectorSection, #imageSection, #zonesContainer,
+    #objectCountsSection, #regulationSection, #criticalBox {
+      transition: opacity 0.3s ease, max-height 0.4s ease;
+    }
 
     /* Method Badge */
     .method-badge-wrap {
@@ -1090,7 +1102,7 @@
     }
     .compliance-container.active {
       display: block;
-      animation: fadeIn 0.4s ease;
+      animation: fadeInSmooth 0.4s ease forwards;
     }
 
     /* Step Cards */
@@ -2741,8 +2753,16 @@
         return;
       }
 
-      uploadArea.style.display = 'none';
-      document.getElementById('instructionSection').style.display = 'none';
+      // Smooth hide upload area to prevent layout jump
+      uploadArea.style.transition = 'opacity 0.3s ease';
+      uploadArea.style.opacity = '0';
+      const instrSec = document.getElementById('instructionSection');
+      instrSec.style.transition = 'opacity 0.3s ease';
+      instrSec.style.opacity = '0';
+      setTimeout(() => {
+        uploadArea.style.display = 'none';
+        instrSec.style.display = 'none';
+      }, 300);
       progressSection.classList.add('active');
       errorBox.classList.remove('active');
       resultsSection.classList.remove('active');
@@ -2823,11 +2843,11 @@
 
     function displayResults(data) {
       console.log('=== ANALYSIS RESPONSE ===');
-      console.log('Raw data:', JSON.stringify(data, null, 2));
       console.log('screenshotUrl:', data.screenshotUrl);
       console.log('screenshotId:', data.screenshotId);
-      console.log('analysis:', data.analysis);
 
+      // Build all DOM content before showing results (prevents layout jumps)
+      resultsSection.style.opacity = '0';
       resultsSection.classList.add('active');
       const a = data.analysis || {};
 
@@ -3138,6 +3158,13 @@
 
       // Meta
       document.getElementById('metaBar').innerHTML = '<span>📁 ' + data.filename + '</span><span>⏱️ ' + data.processingTime + '</span>';
+
+      // Smooth reveal: show everything at once after all DOM updates
+      requestAnimationFrame(() => {
+        resultsSection.style.transition = 'opacity 0.5s ease';
+        resultsSection.style.opacity = '1';
+        resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     }
 
     function toggleZoom(el) { el.classList.toggle('zoomed'); }
@@ -3150,9 +3177,13 @@
 
     function resetUI() {
       uploadArea.style.display = '';
-      document.getElementById('instructionSection').style.display = '';
+      uploadArea.style.opacity = '1';
+      const instrSec = document.getElementById('instructionSection');
+      instrSec.style.display = '';
+      instrSec.style.opacity = '1';
       progressSection.classList.remove('active');
       resultsSection.classList.remove('active');
+      resultsSection.style.opacity = '';
       errorBox.classList.remove('active');
       document.getElementById('progressSteps').innerHTML = '';
       document.getElementById('categoriesGrid').innerHTML = '';

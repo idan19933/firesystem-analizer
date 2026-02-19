@@ -237,10 +237,53 @@ class ComplianceEngine {
   _parseJSON(text) {
     // Try to extract JSON from response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+    if (!jsonMatch) {
+      throw new Error('No valid JSON found in response');
     }
-    throw new Error('No valid JSON found in response');
+
+    let jsonStr = jsonMatch[0];
+
+    // Try direct parse first
+    try {
+      return JSON.parse(jsonStr);
+    } catch (e) {
+      console.log(`⚠️ JSON parse failed, attempting repair: ${e.message}`);
+    }
+
+    // Repair truncated JSON: close unclosed arrays and objects
+    // Count open/close braces and brackets
+    let braces = 0, brackets = 0;
+    let inString = false, escaped = false;
+    for (let i = 0; i < jsonStr.length; i++) {
+      const ch = jsonStr[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === '{') braces++;
+      else if (ch === '}') braces--;
+      else if (ch === '[') brackets++;
+      else if (ch === ']') brackets--;
+    }
+
+    // Trim trailing incomplete entries (cut at last complete object/value)
+    // Find last complete entry by looking for last '}' or '"' before truncation
+    if (braces > 0 || brackets > 0) {
+      // Remove trailing partial entry (after last comma in an array/object context)
+      const lastComma = jsonStr.lastIndexOf(',');
+      if (lastComma > jsonStr.length * 0.5) {
+        jsonStr = jsonStr.substring(0, lastComma);
+      }
+      // Close unclosed brackets and braces
+      jsonStr += ']'.repeat(Math.max(0, brackets)) + '}'.repeat(Math.max(0, braces));
+    }
+
+    try {
+      return JSON.parse(jsonStr);
+    } catch (e2) {
+      console.log(`⚠️ JSON repair failed: ${e2.message}`);
+      throw new Error(`JSON parse failed even after repair: ${e2.message}`);
+    }
   }
 
   // ===== PHASE 1: EXTRACT & CATEGORIZE REQUIREMENTS =====
@@ -305,7 +348,7 @@ class ComplianceEngine {
     const responseText = await this._callClaude([{
       role: 'user',
       content: `${EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText}`
-    }]);
+    }], 16000);
 
     const parsed = this._parseJSON(responseText);
 

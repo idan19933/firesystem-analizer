@@ -800,10 +800,11 @@ async function renderDXFWithAPSHybrid(dxfPath, outputDir) {
 
   console.log('🎯 Using APS+Hybrid Pipeline (APS images + Python entity data)');
 
+  // STEP 1: Run Python FIRST (cached so we don't re-run in catch)
+  console.log('📊 Step 1: Extracting entity data with Python...');
+  const pythonResult = await renderDXFWithPython(dxfPath, outputDir);
+
   try {
-    // STEP 1: Run Python FIRST to extract entity data (no rendering needed, but we get it anyway)
-    console.log('📊 Step 1: Extracting entity data with Python...');
-    const pythonResult = await renderDXFWithPython(dxfPath, outputDir);
 
     if (!pythonResult || !pythonResult.hybridData) {
       console.log('⚠️ Python entity extraction failed, falling back to Python-only rendering');
@@ -818,7 +819,11 @@ async function renderDXFWithAPSHybrid(dxfPath, outputDir) {
     console.log('📤 Step 2: Uploading to APS for high-res rendering...');
     const token = await getAPSToken();
     const bucketKey = await ensureBucket(token);
-    const originalName = path.basename(dxfPath);
+    // Sanitize filename for APS (Hebrew/non-ASCII chars cause translation failures)
+    const rawName = path.basename(dxfPath);
+    const ext = path.extname(rawName);
+    const safeName = rawName.replace(/[^\x20-\x7E]/g, '').trim() || `plan_${Date.now()}`;
+    const originalName = safeName.endsWith(ext) ? safeName : safeName + ext;
     const urn = await uploadToAPS(token, bucketKey, dxfPath, originalName);
 
     console.log('🔄 Step 3: Translating to SVF2...');
@@ -885,8 +890,8 @@ async function renderDXFWithAPSHybrid(dxfPath, outputDir) {
 
   } catch (error) {
     console.log(`⚠️ APS+Hybrid failed: ${error.message}`);
-    // Fallback to Python-only rendering
-    return await renderDXFWithPython(dxfPath, outputDir);
+    // Fallback to cached Python result (no re-run)
+    return pythonResult;
   }
 }
 
@@ -1911,6 +1916,30 @@ function categorizeBlocksByName(entities) {
 }
 
 function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
+  const entities = zone.entities || [];
+  const hasEntities = entities.length > 0;
+
+  // If no entity data at all, return a Vision-only prompt
+  if (!hasEntities) {
+    const basePrompt = analysisType === 'fire-safety' ?
+      `אתה מומחה בטיחות אש ישראלי. נתח את אזור ${zone.zone_id} של תוכנית כיבוי אש.` :
+      `אתה בודק היתרי בנייה ישראלי. בדוק את אזור ${zone.zone_id} של התוכנית.`;
+    return `${basePrompt}
+
+הערה: אין נתוני ישויות זמינים לאזור זה — נתח את התמונה בלבד.
+
+זהה כל אלמנט בטיחות אש הנראה בתמונה:
+ספרינקלרים, גלאי עשן, מטפי כיבוי, דלתות אש, יציאות חירום, מדרגות מוגנות, קירות אש, תאורת חירום.
+
+החזר JSON:
+{
+  "zone_id": "${zone.zone_id}",
+  "overallScore": 0-100,
+  "findings": [{"type":"...", "status":"pass|fail|partial", "description":"...", "confidence":0-100}],
+  "objectCounts": {"sprinklers":0,"smokeDetectors":0,"fireExtinguishers":0,"exits":0,"fireDoors":0,"stairs":0}
+}`;
+  }
+
   // Group entities by AI-classified type (prioritize AI classification over regex)
   const classifiedGroups = {
     SPRINKLER: [],
@@ -1940,7 +1969,7 @@ function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
   };
 
   // Group blocks by their AI classification
-  for (const entity of zone.entities || []) {
+  for (const entity of entities) {
     if (entity.type === 'BLOCK') {
       if (entity.classifiedType && classifiedGroups[entity.classifiedType]) {
         classifiedGroups[entity.classifiedType].push(entity);
@@ -1950,13 +1979,16 @@ function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
     }
   }
 
-  // Build classified summary
+  // Build classified summary — safe access for pixel_pos
   const classifiedSummary = [];
-  for (const [type, entities] of Object.entries(classifiedGroups)) {
-    if (type === 'unclassified' || entities.length === 0) continue;
+  for (const [type, ents] of Object.entries(classifiedGroups)) {
+    if (type === 'unclassified' || ents.length === 0) continue;
     const { icon, label } = typeLabels[type];
-    const locations = entities.slice(0, 10).map(e => `"${e.originalName || e.name}"@(${e.pixel_pos[0]},${e.pixel_pos[1]})`).join(', ');
-    classifiedSummary.push(`${icon} ${label} (${entities.length}): ${locations}${entities.length > 10 ? '...' : ''}`);
+    const locations = ents.slice(0, 10).map(e => {
+      const pos = e.pixel_pos || e.position || [0, 0];
+      return `"${e.originalName || e.name}"@(${pos[0] || 0},${pos[1] || 0})`;
+    }).join(', ');
+    classifiedSummary.push(`${icon} ${label} (${ents.length}): ${locations}${ents.length > 10 ? '...' : ''}`);
   }
 
   // Unclassified blocks
@@ -1965,10 +1997,13 @@ function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
     classifiedSummary.push(`❓ בלוקים לא מסווגים (${classifiedGroups.unclassified.length}): ${unclList}${classifiedGroups.unclassified.length > 15 ? '...' : ''}`);
   }
 
-  // Extract texts
-  const texts = (zone.entities || [])
+  // Extract texts — safe access for pixel_pos
+  const texts = entities
     .filter(e => e.type === 'TEXT' || e.type === 'MTEXT')
-    .map(e => `- "${e.text}" @ (${e.pixel_pos[0]}, ${e.pixel_pos[1]})`);
+    .map(e => {
+      const pos = e.pixel_pos || e.position || [0, 0];
+      return `- "${e.text}" @ (${pos[0] || 0}, ${pos[1] || 0})`;
+    });
 
   // Pre-count from AI classifications
   const preCount = {
@@ -1984,14 +2019,17 @@ function buildHybridZonePrompt(zone, analysisType = 'fire-safety') {
     fireHoseReels: classifiedGroups.FIRE_HOSE_REEL.length
   };
 
+  const gridPos = zone.grid_position || [0, 0];
+  const imgSize = zone.image_size || [0, 0];
+
   const basePrompt = analysisType === 'fire-safety' ?
     `אתה מומחה בטיחות אש ישראלי. נתח את אזור ${zone.zone_id} של תוכנית כיבוי אש.` :
     `אתה בודק היתרי בנייה ישראלי. בדוק את אזור ${zone.zone_id} של התוכנית.`;
 
   return `${basePrompt}
 
-מיקום באזור: שורה ${zone.grid_position[0]}, עמודה ${zone.grid_position[1]}
-גודל תמונה: ${zone.image_size[0]}x${zone.image_size[1]} פיקסלים
+מיקום באזור: שורה ${gridPos[0]}, עמודה ${gridPos[1]}
+גודל תמונה: ${imgSize[0]}x${imgSize[1]} פיקסלים
 
 === אלמנטי בטיחות אש (מסווגים על ידי AI) ===
 ${classifiedSummary.length > 0 ? classifiedSummary.join('\n') : '(לא נמצאו אלמנטי בטיחות באזור זה)'}
@@ -2068,16 +2106,21 @@ async function analyzeHybridZoneWithClaude(zone, analysisType = 'fire-safety') {
 
   // Read zone image
   const imagePath = zone.image_path;
-  if (!fs.existsSync(imagePath)) {
+  if (!imagePath || !fs.existsSync(imagePath)) {
     console.log(`⚠️ Zone image not found: ${imagePath}`);
-    return { zone_id: zone.zone_id, error: 'Image not found', findings: [] };
+    return { zone_id: zone.zone_id || 'unknown', error: 'Image not found', findings: [], objectCounts: {} };
   }
 
-  let imageBuffer = fs.readFileSync(imagePath);
-  imageBuffer = await ensureMaxSizeBuffer(imageBuffer, 7000);
-  const mediaType = getMediaType(imageBuffer);
-
-  const prompt = buildHybridZonePrompt(zone, analysisType);
+  let imageBuffer, mediaType, prompt;
+  try {
+    imageBuffer = fs.readFileSync(imagePath);
+    imageBuffer = await ensureMaxSizeBuffer(imageBuffer, 7000);
+    mediaType = getMediaType(imageBuffer);
+    prompt = buildHybridZonePrompt(zone, analysisType);
+  } catch (prepErr) {
+    console.log(`⚠️ Zone ${zone.zone_id} prep failed: ${prepErr.message}`);
+    return { zone_id: zone.zone_id || 'unknown', error: prepErr.message, findings: [], objectCounts: {} };
+  }
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -2117,18 +2160,23 @@ async function analyzeHybridZoneWithClaude(zone, analysisType = 'fire-safety') {
   }
 
   const data = await resp.json();
-  const content = data.content[0].text;
+  const content = (data.content && data.content[0] && data.content[0].text) || '';
 
   try {
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(jsonMatch[0]);
+      // Ensure required fields exist
+      parsed.zone_id = parsed.zone_id || zone.zone_id;
+      parsed.findings = parsed.findings || [];
+      parsed.objectCounts = parsed.objectCounts || {};
+      return parsed;
     }
   } catch (e) {
-    console.log(`⚠️ JSON parse failed for ${zone.zone_id}`);
+    console.log(`⚠️ JSON parse failed for ${zone.zone_id}: ${e.message}`);
   }
 
-  return { zone_id: zone.zone_id, findings: [], rawContent: content };
+  return { zone_id: zone.zone_id, findings: [], objectCounts: {}, rawContent: content };
 }
 
 /**
