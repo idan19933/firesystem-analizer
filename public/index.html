@@ -1338,6 +1338,264 @@
       display: none;
     }
 
+    /* ===== SMART COMPLIANCE CHECKER STYLES ===== */
+    .cc-extraction-summary {
+      background: linear-gradient(135deg, rgba(17,24,39,0.95), rgba(31,41,55,0.95));
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 14px;
+      padding: 24px;
+      margin-top: 20px;
+      text-align: center;
+    }
+    .cc-extraction-summary h4 {
+      color: #60a5fa; margin-bottom: 14px; font-size: 1rem;
+      font-weight: 500; letter-spacing: 0.3px;
+    }
+    .cc-total-count {
+      font-size: 3.2rem; font-weight: 800; color: #f1f5f9;
+      line-height: 1; margin-bottom: 6px;
+    }
+    .cc-total-count::after {
+      content: ' דרישות'; font-size: 1rem; font-weight: 400; color: var(--text-muted);
+    }
+    .cc-method-breakdown {
+      display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+      margin-top: 16px;
+    }
+    .cc-method-tag {
+      padding: 5px 12px; border-radius: 6px; font-size: 0.82rem; font-weight: 500;
+      display: flex; align-items: center; gap: 5px;
+      border: 1px solid transparent;
+    }
+    .cc-method-tag.plan { background: rgba(59,130,246,0.1); color: #93bbfd; border-color: rgba(59,130,246,0.15); }
+    .cc-method-tag.doc { background: rgba(168,85,247,0.1); color: #c4b5fd; border-color: rgba(168,85,247,0.15); }
+    .cc-method-tag.human { background: rgba(234,179,8,0.1); color: #fde68a; border-color: rgba(234,179,8,0.15); }
+    .cc-method-tag.measure { background: rgba(20,184,166,0.1); color: #99f6e4; border-color: rgba(20,184,166,0.15); }
+    .cc-method-tag.approval { background: rgba(239,68,68,0.1); color: #fca5a5; border-color: rgba(239,68,68,0.15); }
+
+    .cc-plan-check-info {
+      background: rgba(59,130,246,0.06); border: 1px solid rgba(59,130,246,0.15);
+      border-radius: 8px; padding: 10px 16px; margin-bottom: 16px;
+      font-size: 0.88rem; color: #93bbfd;
+    }
+
+    /* Dashboard */
+    .cc-dashboard {
+      background: linear-gradient(180deg, rgba(17,24,39,0.98), rgba(15,23,42,0.98));
+      border: 1px solid var(--border);
+      border-radius: 16px; padding: 28px; margin-bottom: 20px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+    }
+    .cc-project-title {
+      font-size: 1.3rem; font-weight: 600; margin-bottom: 20px; text-align: center;
+      color: var(--text); letter-spacing: 0.2px;
+    }
+    .cc-progress-bar-wrap { margin-bottom: 24px; }
+    .cc-progress-label {
+      display: flex; justify-content: space-between; margin-bottom: 8px;
+      font-size: 0.88rem; color: var(--text-muted);
+    }
+    .cc-progress-track {
+      height: 8px; background: rgba(55,65,81,0.6); border-radius: 4px; overflow: hidden;
+    }
+    .cc-progress-fill {
+      height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e);
+      border-radius: 4px; transition: width 0.6s cubic-bezier(0.4,0,0.2,1);
+    }
+    .cc-score-cards {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px;
+    }
+    .cc-score-card {
+      text-align: center; padding: 14px 8px;
+      border-radius: 10px; border: 1px solid rgba(55,65,81,0.5);
+      background: rgba(31,41,55,0.5);
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .cc-score-card:hover { transform: translateY(-2px); }
+    .cc-score-card.pass { border-color: rgba(34,197,94,0.25); }
+    .cc-score-card.fail { border-color: rgba(239,68,68,0.25); }
+    .cc-score-card.partial { border-color: rgba(234,179,8,0.25); }
+    .cc-score-card.pending { border-color: rgba(100,116,139,0.25); }
+    .cc-score-num { font-size: 2rem; font-weight: 800; line-height: 1.1; }
+    .cc-score-card.pass .cc-score-num { color: #4ade80; }
+    .cc-score-card.fail .cc-score-num { color: #f87171; }
+    .cc-score-card.partial .cc-score-num { color: #fbbf24; }
+    .cc-score-card.pending .cc-score-num { color: #64748b; }
+    .cc-score-lbl { font-size: 0.78rem; color: var(--text-muted); margin-top: 2px; }
+    .cc-method-chips {
+      display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+    }
+
+    /* Filters */
+    .cc-filters {
+      display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;
+    }
+    .cc-filters select {
+      flex: 1; min-width: 140px;
+      padding: 8px 12px; border-radius: 8px;
+      background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
+      font-family: inherit; font-size: 0.9rem; cursor: pointer;
+    }
+
+    /* Checklist */
+    .cc-category-group { margin-bottom: 20px; }
+    .cc-category-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 11px 18px;
+      background: linear-gradient(135deg, rgba(31,41,55,0.9), rgba(17,24,39,0.9));
+      border-radius: 8px; cursor: pointer; margin-bottom: 6px;
+      border: 1px solid var(--border);
+      transition: background 0.2s, border-color 0.2s;
+      user-select: none;
+    }
+    .cc-category-header:hover { border-color: rgba(99,102,241,0.3); }
+    .cc-category-header .cc-cat-name { font-weight: 600; flex: 1; font-size: 0.95rem; }
+    .cc-category-header .cc-cat-count {
+      font-size: 0.8rem; color: var(--text-dim);
+      background: rgba(0,0,0,0.3); padding: 3px 12px; border-radius: 4px;
+      font-weight: 500;
+    }
+    .cc-category-header .cc-cat-arrow {
+      transition: transform 0.25s; color: var(--text-dim); font-size: 0.7rem;
+    }
+    .cc-category-header.collapsed .cc-cat-arrow { transform: rotate(-90deg); }
+    .cc-category-items { padding-right: 0; }
+    .cc-category-items.collapsed { display: none; }
+
+    /* Requirement Item */
+    .cc-req-item {
+      display: flex; gap: 14px; padding: 16px 18px;
+      background: rgba(17,24,39,0.6);
+      border: 1px solid rgba(55,65,81,0.4);
+      border-radius: 8px; margin-bottom: 6px;
+      border-right: 3px solid rgba(100,116,139,0.3);
+      transition: all 0.25s ease;
+    }
+    .cc-req-item:hover { background: rgba(31,41,55,0.6); border-color: rgba(99,102,241,0.2); }
+    .cc-req-item.pass { border-right-color: #22c55e; }
+    .cc-req-item.fail { border-right-color: #ef4444; }
+    .cc-req-item.partial { border-right-color: #eab308; }
+    .cc-req-item.unclear { border-right-color: #f97316; }
+    .cc-req-item.pending { border-right-color: rgba(100,116,139,0.3); }
+
+    .cc-req-status {
+      width: 30px; height: 30px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.85rem; font-weight: 700; flex-shrink: 0;
+      background: rgba(55,65,81,0.4); color: var(--text-dim);
+    }
+    .cc-req-item.pass .cc-req-status { background: rgba(34,197,94,0.15); color: #4ade80; }
+    .cc-req-item.fail .cc-req-status { background: rgba(239,68,68,0.15); color: #f87171; }
+    .cc-req-item.partial .cc-req-status { background: rgba(234,179,8,0.15); color: #fbbf24; }
+    .cc-req-item.unclear .cc-req-status { background: rgba(251,146,60,0.15); color: #fb923c; }
+
+    .cc-req-body { flex: 1; min-width: 0; }
+    .cc-req-title {
+      font-weight: 600; font-size: 0.92rem; margin-bottom: 4px;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .cc-req-id {
+      font-size: 0.7rem; color: var(--text-dim); font-weight: 500;
+      background: rgba(0,0,0,0.3); padding: 2px 7px; border-radius: 3px;
+      font-family: monospace;
+    }
+    .cc-req-severity {
+      font-size: 0.68rem; padding: 2px 7px; border-radius: 3px; font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .cc-req-severity.critical { background: rgba(239,68,68,0.12); color: #fca5a5; }
+    .cc-req-severity.major { background: rgba(234,179,8,0.12); color: #fde68a; }
+    .cc-req-severity.minor { background: rgba(148,163,184,0.12); color: #94a3b8; }
+
+    .cc-req-desc {
+      font-size: 0.84rem; color: var(--text-muted); margin-bottom: 8px; line-height: 1.5;
+    }
+
+    .cc-req-finding {
+      font-size: 0.84rem; padding: 8px 12px; border-radius: 6px;
+      margin-bottom: 6px; line-height: 1.5;
+    }
+    .cc-req-item.pass .cc-req-finding { background: rgba(34,197,94,0.06); color: #86efac; border: 1px solid rgba(34,197,94,0.1); }
+    .cc-req-item.fail .cc-req-finding { background: rgba(239,68,68,0.06); color: #fca5a5; border: 1px solid rgba(239,68,68,0.1); }
+    .cc-req-item.partial .cc-req-finding { background: rgba(234,179,8,0.06); color: #fde68a; border: 1px solid rgba(234,179,8,0.1); }
+    .cc-req-item.unclear .cc-req-finding { background: rgba(251,146,60,0.06); color: #fed7aa; border: 1px solid rgba(251,146,60,0.1); }
+
+    .cc-req-confidence {
+      font-size: 0.75rem; color: var(--text-dim); margin-bottom: 6px;
+    }
+    .cc-req-conf-bar {
+      display: inline-block; width: 50px; height: 3px; background: rgba(0,0,0,0.3);
+      border-radius: 2px; vertical-align: middle; margin-right: 6px;
+    }
+    .cc-req-conf-fill {
+      height: 100%; border-radius: 2px;
+    }
+
+    /* Method-specific action areas */
+    .cc-req-action {
+      margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(55,65,81,0.3);
+    }
+    .cc-req-action .cc-action-btn {
+      padding: 5px 12px; border-radius: 5px; border: 1px solid rgba(55,65,81,0.5);
+      background: rgba(31,41,55,0.5); color: var(--text-muted); cursor: pointer;
+      font-family: inherit; font-size: 0.8rem; transition: all 0.2s;
+    }
+    .cc-req-action .cc-action-btn:hover { border-color: rgba(99,102,241,0.4); color: var(--text); }
+    .cc-req-action .cc-action-btn.active {
+      background: linear-gradient(135deg, #3b82f6, #2563eb);
+      color: #fff; border-color: #3b82f6;
+    }
+
+    .cc-human-verify {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .cc-human-verify input[type="text"] {
+      padding: 5px 10px; border-radius: 5px; border: 1px solid rgba(55,65,81,0.5);
+      background: rgba(0,0,0,0.2); color: var(--text); font-family: inherit; font-size: 0.8rem;
+      width: 130px; transition: border-color 0.2s;
+    }
+    .cc-human-verify input[type="text"]:focus { border-color: rgba(99,102,241,0.5); outline: none; }
+    .cc-human-verify input[type="text"]::placeholder { color: var(--text-dim); }
+
+    .cc-doc-upload-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 12px; border-radius: 5px; border: 1px dashed rgba(55,65,81,0.5);
+      background: transparent; color: var(--text-muted); cursor: pointer;
+      font-family: inherit; font-size: 0.8rem; transition: all 0.2s;
+    }
+    .cc-doc-upload-btn:hover { border-color: rgba(99,102,241,0.4); color: var(--text); }
+    .cc-doc-uploaded { color: #4ade80; font-size: 0.8rem; }
+
+    .cc-method-badge {
+      font-size: 0.68rem; padding: 2px 7px; border-radius: 3px; font-weight: 500;
+      border: 1px solid transparent;
+    }
+    .cc-method-badge.plan { background: rgba(59,130,246,0.1); color: #93bbfd; border-color: rgba(59,130,246,0.12); }
+    .cc-method-badge.doc { background: rgba(168,85,247,0.1); color: #c4b5fd; border-color: rgba(168,85,247,0.12); }
+    .cc-method-badge.human { background: rgba(234,179,8,0.1); color: #fde68a; border-color: rgba(234,179,8,0.12); }
+    .cc-method-badge.measure { background: rgba(20,184,166,0.1); color: #99f6e4; border-color: rgba(20,184,166,0.12); }
+    .cc-method-badge.approval { background: rgba(239,68,68,0.1); color: #fca5a5; border-color: rgba(239,68,68,0.12); }
+
+    .cc-actions {
+      text-align: center; margin-top: 28px; padding: 20px 0;
+    }
+
+    /* Prevent layout jumps: smooth transitions for sections appearing/disappearing */
+    .step-card, .cc-checklist-section, .progress-section {
+      transition: opacity 0.3s ease;
+    }
+
+    /* Print styles */
+    @media print {
+      .bg-gradient, .header, .main-mode-toggle, .cc-filters, .cc-actions,
+      .cc-req-action, .footer, .step-card, .progress-section { display: none !important; }
+      .cc-checklist-section { display: block !important; }
+      .cc-dashboard { break-inside: avoid; }
+      .cc-req-item { break-inside: avoid; border: 1px solid #ccc !important; }
+      body { background: #fff; color: #000; }
+      .cc-dashboard, .cc-req-item, .cc-category-header { background: #fff; border-color: #ddd; }
+    }
+
     /* Responsive */
     @media (max-width: 768px) {
       .header h1 { font-size: 2rem; }
@@ -1350,6 +1608,8 @@
       .vector-grid { grid-template-columns: repeat(3, 1fr); }
       .main-mode-toggle { flex-direction: column; }
       .main-mode-btn { justify-content: center; }
+      .cc-score-cards { grid-template-columns: repeat(2, 1fr); }
+      .cc-filters { flex-direction: column; }
     }
   </style>
 </head>
@@ -1377,8 +1637,9 @@
   </div>
 
   <div class="container">
-    <!-- ===== COMPLIANCE MODE ===== -->
+    <!-- ===== SMART COMPLIANCE MODE ===== -->
     <div class="compliance-container" id="complianceContainer">
+
       <!-- Step 1: Reference Documents -->
       <section class="step-card active" id="referenceStep">
         <div class="step-header">
@@ -1386,8 +1647,8 @@
           <h3 class="step-title">העלאת מסמכי ייחוס</h3>
         </div>
         <p style="color: var(--text-muted); margin-bottom: 20px;">
-          העלה את מסמכי הייחוס של הפרויקט: תקנון תב"ע, גליון דרישות, תיק מידע וכדומה.
-          המערכת תחלץ את כל הדרישות באופן אוטומטי.
+          העלה את מסמכי הייחוס: תקנון תב"ע, גליון דרישות, תיק מידע, כב"א וכדומה.
+          המערכת תחלץ ותסווג כל דרישה אוטומטית.
         </p>
 
         <div class="reference-upload-area" id="referenceUploadArea" onclick="document.getElementById('referenceFileInput').click()">
@@ -1404,17 +1665,15 @@
 
         <div class="uploaded-files-list" id="uploadedReferenceFiles"></div>
 
-        <div class="requirements-summary" id="requirementsSummary" style="display: none;">
-          <h4>✅ דרישות שחולצו</h4>
-          <div style="display: flex; align-items: center; gap: 20px;">
-            <span class="requirements-count" id="requirementsCount">0</span>
-            <span style="color: var(--text-muted);">דרישות מוכנות לבדיקה</span>
-          </div>
-          <div class="requirements-categories" id="requirementsCategories"></div>
+        <!-- Requirements extraction summary (shown after processing) -->
+        <div class="cc-extraction-summary" id="ccExtractionSummary" style="display:none">
+          <h4>דרישות שחולצו וסווגו</h4>
+          <div class="cc-total-count" id="ccTotalCount">0</div>
+          <div class="cc-method-breakdown" id="ccMethodBreakdown"></div>
         </div>
 
-        <button class="btn" id="processReferenceBtn" style="width: 100%; margin-top: 20px; display: none;" onclick="processReferenceDocuments()">
-          🔍 חלץ דרישות מהמסמכים
+        <button class="btn" id="processReferenceBtn" style="width: 100%; margin-top: 20px; display: none;" onclick="ccProcessReference()">
+          🔍 חלץ וסווג דרישות
         </button>
       </section>
 
@@ -1424,9 +1683,10 @@
           <div class="step-number">2</div>
           <h3 class="step-title">העלאת תכניות לבדיקה</h3>
         </div>
-        <p style="color: var(--text-muted); margin-bottom: 20px;">
-          העלה את התכניות לבדיקה מול הדרישות שחולצו.
+        <p style="color: var(--text-muted); margin-bottom: 16px;">
+          העלה קבצי DXF/DWG — AI יבדוק אוטומטית את הדרישות הרלוונטיות מהתכניות.
         </p>
+        <div class="cc-plan-check-info" id="ccPlanCheckInfo"></div>
 
         <div class="plan-upload-area" id="planUploadArea" onclick="document.getElementById('planFileInput').click()">
           <div class="upload-icon" style="background: linear-gradient(135deg, #1a365d, #2563eb);">📐</div>
@@ -1441,7 +1701,7 @@
         </div>
       </section>
 
-      <!-- Compliance Progress -->
+      <!-- Progress -->
       <section class="progress-section" id="complianceProgressSection">
         <div class="progress-header">
           <h3>מעבד...</h3>
@@ -1453,58 +1713,62 @@
         <div class="progress-steps" id="complianceProgressSteps"></div>
       </section>
 
-      <!-- Compliance Results -->
-      <section class="compliance-results" id="complianceResults">
-        <!-- Analysis Method Badge -->
-        <div class="method-badge-wrap" id="complianceMethodBadge" style="display:none">
-          <div class="method-badge vector" id="complianceMethodLabel">
-            <span>📐</span>
-            <span>וקטורים</span>
+      <!-- Step 3: Unified Compliance Checklist -->
+      <section class="cc-checklist-section" id="ccChecklistSection" style="display:none">
+
+        <!-- Dashboard Header -->
+        <div class="cc-dashboard">
+          <div class="cc-project-title" id="ccProjectTitle">רשימת תאימות</div>
+          <div class="cc-progress-bar-wrap">
+            <div class="cc-progress-label">
+              <span id="ccProgressText">0/0</span>
+              <span id="ccProgressPct">0%</span>
+            </div>
+            <div class="cc-progress-track">
+              <div class="cc-progress-fill" id="ccProgressFill" style="width:0%"></div>
+            </div>
           </div>
-        </div>
-
-        <!-- Plan Preview -->
-        <div class="image-section" id="compliancePlanPreview" style="display:none">
-          <div class="image-header">
-            <h3>📐 התכנית המעובדת</h3>
-            <span class="source-badge vector" id="complianceImageSource">רינדור וקטורי</span>
+          <div class="cc-score-cards">
+            <div class="cc-score-card pass"><div class="cc-score-num" id="ccPassCount">0</div><div class="cc-score-lbl">עובר</div></div>
+            <div class="cc-score-card fail"><div class="cc-score-num" id="ccFailCount">0</div><div class="cc-score-lbl">נכשל</div></div>
+            <div class="cc-score-card partial"><div class="cc-score-num" id="ccPartialCount">0</div><div class="cc-score-lbl">חלקי/לא ברור</div></div>
+            <div class="cc-score-card pending"><div class="cc-score-num" id="ccPendingCount">0</div><div class="cc-score-lbl">ממתין</div></div>
           </div>
-          <div class="image-wrap" onclick="toggleZoom(this)">
-            <img id="compliancePlanImage" src="" alt="Plan">
-          </div>
+          <div class="cc-method-chips" id="ccMethodChips"></div>
         </div>
 
-        <!-- Compliance Score -->
-        <div class="compliance-score-card" id="complianceScoreCard">
-          <div class="compliance-score" id="complianceScoreValue">--</div>
-          <div style="color: var(--text-muted); font-size: 1.1rem;">% תאימות</div>
-          <div class="plan-type-badge" id="planTypeBadge">--</div>
+        <!-- Filters -->
+        <div class="cc-filters">
+          <select id="ccFilterStatus" onchange="ccRenderChecklist()">
+            <option value="all">כל הסטטוסים</option>
+            <option value="pass">עובר</option>
+            <option value="fail">נכשל</option>
+            <option value="partial">חלקי</option>
+            <option value="unclear">לא ברור</option>
+            <option value="pending">ממתין</option>
+          </select>
+          <select id="ccFilterCategory" onchange="ccRenderChecklist()">
+            <option value="all">כל הקטגוריות</option>
+          </select>
+          <select id="ccFilterMethod" onchange="ccRenderChecklist()">
+            <option value="all">כל שיטות האימות</option>
+            <option value="ai_plan_check">בדיקה מתכניות</option>
+            <option value="ai_document_check">בדיקת מסמכים</option>
+            <option value="human_verify">אימות ידני</option>
+            <option value="measurement">מדידות</option>
+            <option value="external_approval">אישורים חיצוניים</option>
+          </select>
         </div>
 
-        <!-- Requirements Checklist -->
-        <div class="requirements-checklist" id="requirementsChecklist">
-          <h3>📋 רשימת דרישות</h3>
-          <div id="checklistItems"></div>
-        </div>
-
-        <!-- Detected Objects -->
-        <div class="vector-section" id="detectedObjectsSection" style="display:none">
-          <h3>📊 אובייקטים שזוהו מהתכנית</h3>
-          <div class="vector-grid" id="detectedObjectsGrid"></div>
-        </div>
-
-        <!-- Potential Issues -->
-        <div class="critical-box" id="complianceIssuesBox" style="display:none">
-          <h3>⚠️ בעיות פוטנציאליות</h3>
-          <ul id="complianceIssuesList"></ul>
-        </div>
+        <!-- Checklist Items (rendered by JS, grouped by category) -->
+        <div class="cc-checklist" id="ccChecklist"></div>
 
         <!-- Actions -->
-        <div style="text-align: center; margin-top: 24px;">
-          <button class="btn" onclick="uploadAnotherPlan()" style="margin-left: 12px;">📐 בדוק תכנית נוספת</button>
-          <button class="btn" onclick="startNewProject()" style="background: var(--bg-elevated); border: 1px solid var(--border);">🔄 פרויקט חדש</button>
+        <div class="cc-actions">
+          <button class="btn" onclick="ccStartNewProject()">🔄 פרויקט חדש</button>
         </div>
       </section>
+
     </div>
 
     <!-- ===== FIRE SAFETY MODE ===== -->
@@ -1730,8 +1994,8 @@
         fireSafetyContainer.classList.add('hidden');
         complianceContainer.classList.add('active');
         document.getElementById('headerLogo').textContent = '📋';
-        document.getElementById('headerTitle').textContent = 'בודק תאימות היתר';
-        document.getElementById('headerSubtitle').textContent = 'בדיקת תכניות מול דרישות היתר בנייה';
+        document.getElementById('headerTitle').textContent = 'בודק תאימות היתר בנייה';
+        document.getElementById('headerSubtitle').textContent = 'מערכת חכמה לבדיקת תכניות מול דרישות רגולטוריות — AI + אימות ידני';
       }
     }
 
@@ -1765,27 +2029,44 @@
       updateReferenceFilesList();
     }
 
-    async function processReferenceDocuments() {
+    // ═══════════════════════════════════════════════════════
+    // SMART COMPLIANCE CHECKER — Frontend Logic
+    // ═══════════════════════════════════════════════════════
+
+    const METHOD_META = {
+      ai_plan_check:    { icon: '🔍', label: 'בדיקה מתכניות', cls: 'plan' },
+      ai_document_check: { icon: '📄', label: 'בדיקת מסמכים', cls: 'doc' },
+      human_verify:      { icon: '👤', label: 'אימות ידני', cls: 'human' },
+      measurement:       { icon: '📐', label: 'מדידות', cls: 'measure' },
+      external_approval: { icon: '🏛️', label: 'אישורים חיצוניים', cls: 'approval' }
+    };
+
+    // ===== STEP 1: PROCESS REFERENCE DOCS =====
+
+    async function ccProcessReference() {
       if (referenceFiles.length === 0) return;
 
       const btn = document.getElementById('processReferenceBtn');
       btn.disabled = true;
-      btn.innerHTML = '⏳ מעבד מסמכים...';
+      btn.innerHTML = '⏳ מחלץ ומסווג דרישות...';
 
-      // Show progress
       const progressSection = document.getElementById('complianceProgressSection');
       progressSection.classList.add('active');
-      updateComplianceProgress('📤 מעלה מסמכים...', 10);
+      ccUpdateProgress('📤 מעלה מסמכים...', 10);
 
       try {
+        // Step 1: Create project
+        ccUpdateProgress('🔧 יוצר פרויקט...', 15);
+        const createResp = await fetch(API_BASE.replace('/api', '') + '/api/compliance/create', { method: 'POST' });
+        const { projectId } = await createResp.json();
+        currentProjectId = projectId;
+
+        // Step 2: Upload & extract
+        ccUpdateProgress('🤖 AI מחלץ ומסווג דרישות...', 30);
         const formData = new FormData();
-        referenceFiles.forEach(file => {
-          formData.append('referenceFiles', file);
-        });
+        referenceFiles.forEach(file => formData.append('files', file));
 
-        updateComplianceProgress('🔍 מחלץ טקסט...', 30);
-
-        const resp = await fetch(API_BASE + '/reference/upload', {
+        const resp = await fetch(API_BASE.replace('/api', '') + `/api/compliance/${projectId}/reference`, {
           method: 'POST',
           body: formData
         });
@@ -1795,47 +2076,46 @@
           throw new Error(err.error || 'שגיאת שרת');
         }
 
-        updateComplianceProgress('🤖 מנתח דרישות...', 70);
-
+        ccUpdateProgress('📊 מעבד תוצאות...', 80);
         const data = await resp.json();
-
-        updateComplianceProgress('✅ הושלם!', 100);
-
-        // Store project data
-        currentProjectId = data.projectId;
         projectRequirements = data.requirements || [];
+        const summary = data.summary;
 
-        // Update UI
+        ccUpdateProgress('✅ הושלם!', 100);
+
         setTimeout(() => {
           progressSection.classList.remove('active');
           document.getElementById('complianceProgressSteps').innerHTML = '';
 
-          // Mark step 1 as completed
+          // Show extraction summary
+          const summaryDiv = document.getElementById('ccExtractionSummary');
+          summaryDiv.style.display = 'block';
+          document.getElementById('ccTotalCount').textContent = summary.total;
+
+          const breakdownDiv = document.getElementById('ccMethodBreakdown');
+          breakdownDiv.innerHTML = Object.entries(summary.by_method || {}).map(([method, info]) => {
+            const meta = METHOD_META[method] || { icon: '?', label: method, cls: '' };
+            return `<span class="cc-method-tag ${meta.cls}">${meta.icon} ${meta.label}: ${info.total}</span>`;
+          }).join('');
+
+          // Update step states
           document.getElementById('referenceStep').classList.remove('active');
           document.getElementById('referenceStep').classList.add('completed');
-
-          // Show requirements summary
-          const summary = document.getElementById('requirementsSummary');
-          summary.style.display = 'block';
-          document.getElementById('requirementsCount').textContent = data.requirementsExtracted;
-
-          // Show categories
-          const categories = {};
-          projectRequirements.forEach(req => {
-            const cat = req.category || 'כללי';
-            categories[cat] = (categories[cat] || 0) + 1;
-          });
-          document.getElementById('requirementsCategories').innerHTML = Object.entries(categories)
-            .map(([cat, count]) => `<span class="req-category-tag">${cat} (${count})</span>`)
-            .join('');
-
-          // Enable step 2
-          document.getElementById('planStep').classList.remove('disabled');
-          document.getElementById('planStep').classList.add('active');
-
-          // Hide the upload area and button
           document.getElementById('referenceUploadArea').style.display = 'none';
           document.getElementById('processReferenceBtn').style.display = 'none';
+
+          // Enable step 2
+          const planStep = document.getElementById('planStep');
+          planStep.classList.remove('disabled');
+          planStep.classList.add('active');
+
+          // Show plan check info
+          const planCount = (summary.by_method?.ai_plan_check?.total || 0) + (summary.by_method?.measurement?.total || 0);
+          document.getElementById('ccPlanCheckInfo').innerHTML =
+            `AI יבדוק <strong>${planCount}</strong> דרישות מתוך התכניות. שאר הדרישות יופיעו כרשימת אימות ידנית.`;
+
+          // Show the checklist immediately (all items pending)
+          ccShowChecklist();
 
         }, 800);
 
@@ -1844,100 +2124,403 @@
         alert('שגיאה: ' + err.message);
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '🔍 חלץ דרישות מהמסמכים';
+        btn.innerHTML = '🔍 חלץ וסווג דרישות';
       }
     }
 
-    // Plan file input handler
+    // ===== STEP 2: PLAN UPLOAD & AI CHECK =====
+
     document.getElementById('planFileInput').addEventListener('change', (e) => {
       const file = e.target.files[0];
-      if (file) handleCompliancePlan(file);
+      if (file) ccHandlePlan(file);
     });
 
-    // Drag and drop for plan upload
     const planUploadArea = document.getElementById('planUploadArea');
     planUploadArea.addEventListener('dragover', e => { e.preventDefault(); planUploadArea.style.borderColor = '#2563eb'; });
     planUploadArea.addEventListener('dragleave', () => planUploadArea.style.borderColor = '');
     planUploadArea.addEventListener('drop', e => {
       e.preventDefault();
       planUploadArea.style.borderColor = '';
-      if (e.dataTransfer.files.length) handleCompliancePlan(e.dataTransfer.files[0]);
+      if (e.dataTransfer.files.length) ccHandlePlan(e.dataTransfer.files[0]);
     });
 
-    async function handleCompliancePlan(file) {
-      if (!currentProjectId) {
-        alert('יש להעלות מסמכי ייחוס תחילה');
-        return;
-      }
-
+    async function ccHandlePlan(file) {
+      if (!currentProjectId) { alert('יש להעלות מסמכי ייחוס תחילה'); return; }
       const ext = file.name.split('.').pop().toLowerCase();
-      if (!['dwg', 'dxf', 'dwf', 'zip'].includes(ext)) {
-        alert('נא להעלות קובץ DWG, DXF, DWF או ZIP');
-        return;
-      }
+      if (!['dwg', 'dxf', 'dwf', 'zip'].includes(ext)) { alert('נא להעלות קובץ DWG, DXF, DWF או ZIP'); return; }
 
-      // Hide steps, show progress
-      document.getElementById('referenceStep').style.display = 'none';
-      document.getElementById('planStep').style.display = 'none';
+      // Smooth hide steps
+      const refStep = document.getElementById('referenceStep');
+      const planStepEl = document.getElementById('planStep');
+      refStep.style.transition = 'opacity 0.3s ease';
+      planStepEl.style.transition = 'opacity 0.3s ease';
+      refStep.style.opacity = '0';
+      planStepEl.style.opacity = '0';
+      setTimeout(() => { refStep.style.display = 'none'; planStepEl.style.display = 'none'; }, 300);
 
       const progressSection = document.getElementById('complianceProgressSection');
       progressSection.classList.add('active');
 
       const steps = [
         { msg: '📤 מעלה תכנית...', pct: 10 },
-        { msg: '🔄 מעבד קובץ...', pct: 25 },
-        { msg: '📸 מייצר תמונה ברזולוציה גבוהה...', pct: 45 },
-        { msg: '🔍 בודק דרישות...', pct: 70 },
-        { msg: '📊 מכין דוח תאימות...', pct: 90 }
+        { msg: '🔄 מעבד קובץ DXF...', pct: 25 },
+        { msg: '📸 מייצר תמונות...', pct: 45 },
+        { msg: '🔍 AI בודק דרישות מהתכניות...', pct: 70 },
+        { msg: '📊 מעדכן רשימת תאימות...', pct: 90 }
       ];
 
       let stepIdx = 0;
       const interval = setInterval(() => {
-        if (stepIdx < steps.length) {
-          updateComplianceProgress(steps[stepIdx].msg, steps[stepIdx].pct);
-          stepIdx++;
-        }
-      }, 6000);
+        if (stepIdx < steps.length) { ccUpdateProgress(steps[stepIdx].msg, steps[stepIdx].pct); stepIdx++; }
+      }, 8000);
 
-      updateComplianceProgress('📤 מתחיל...', 5);
+      ccUpdateProgress('📤 מתחיל...', 5);
 
       try {
         const formData = new FormData();
         formData.append('planFile', file);
-        formData.append('projectId', currentProjectId);
 
-        const resp = await fetch(API_BASE + '/plans/analyze', {
+        const resp = await fetch(API_BASE.replace('/api', '') + `/api/compliance/${currentProjectId}/check-plans`, {
           method: 'POST',
           body: formData
         });
 
         clearInterval(interval);
 
-        if (!resp.ok) {
-          const err = await resp.json();
-          throw new Error(err.error || 'שגיאת שרת');
-        }
+        if (!resp.ok) { const err = await resp.json(); throw new Error(err.error || 'שגיאת שרת'); }
 
         const data = await resp.json();
-        updateComplianceProgress('✅ הושלם!', 100);
+        ccUpdateProgress('✅ הושלם!', 100);
+
+        // Refresh requirements from server
+        const checklistResp = await fetch(API_BASE.replace('/api', '') + `/api/compliance/${currentProjectId}/checklist`);
+        const checklist = await checklistResp.json();
+        projectRequirements = checklist.requirements || [];
 
         setTimeout(() => {
           progressSection.classList.remove('active');
           document.getElementById('complianceProgressSteps').innerHTML = '';
-          displayComplianceResults(data);
+          document.getElementById('referenceStep').style.display = 'none';
+          document.getElementById('planStep').style.display = 'none';
+          ccShowChecklist();
         }, 800);
 
       } catch (err) {
         clearInterval(interval);
         progressSection.classList.remove('active');
         alert('שגיאה: ' + err.message);
-        // Show steps again
-        document.getElementById('referenceStep').style.display = '';
-        document.getElementById('planStep').style.display = '';
+        // Restore steps smoothly
+        const rs = document.getElementById('referenceStep');
+        const ps = document.getElementById('planStep');
+        rs.style.display = ''; ps.style.display = '';
+        requestAnimationFrame(() => { rs.style.opacity = '1'; ps.style.opacity = '1'; });
       }
     }
 
-    function updateComplianceProgress(msg, pct) {
+    // ===== CHECKLIST RENDERING =====
+
+    function ccShowChecklist() {
+      const section = document.getElementById('ccChecklistSection');
+      section.style.display = 'block';
+      section.style.opacity = '0';
+      ccUpdateDashboard();
+      ccPopulateCategoryFilter();
+      ccRenderChecklist();
+      // Fade in smoothly without jumping
+      requestAnimationFrame(() => {
+        section.style.transition = 'opacity 0.4s ease';
+        section.style.opacity = '1';
+        // Smooth scroll to checklist after render
+        setTimeout(() => section.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      });
+    }
+
+    function ccUpdateDashboard() {
+      const reqs = projectRequirements;
+      let passed = 0, failed = 0, partialUnclear = 0, pending = 0;
+
+      for (const r of reqs) {
+        const s = r.final_status || r.human_result?.status || r.ai_result?.status;
+        if (!s) pending++;
+        else if (s === 'pass') passed++;
+        else if (s === 'fail') failed++;
+        else partialUnclear++;
+      }
+
+      const checked = reqs.length - pending;
+      document.getElementById('ccPassCount').textContent = passed;
+      document.getElementById('ccFailCount').textContent = failed;
+      document.getElementById('ccPartialCount').textContent = partialUnclear;
+      document.getElementById('ccPendingCount').textContent = pending;
+
+      document.getElementById('ccProgressText').textContent = `${checked}/${reqs.length}`;
+      const pct = reqs.length > 0 ? Math.round((checked / reqs.length) * 100) : 0;
+      document.getElementById('ccProgressPct').textContent = pct + '%';
+      document.getElementById('ccProgressFill').style.width = pct + '%';
+
+      // Method chips
+      const methods = {};
+      for (const r of reqs) {
+        const m = r.verification_method || 'unknown';
+        if (!methods[m]) methods[m] = { total: 0, done: 0 };
+        methods[m].total++;
+        if (r.final_status) methods[m].done++;
+      }
+      document.getElementById('ccMethodChips').innerHTML = Object.entries(methods).map(([m, v]) => {
+        const meta = METHOD_META[m] || { icon: '?', label: m, cls: '' };
+        return `<span class="cc-method-tag ${meta.cls}">${meta.icon} ${meta.label}: ${v.done}/${v.total}</span>`;
+      }).join('');
+    }
+
+    function ccPopulateCategoryFilter() {
+      const cats = new Set();
+      for (const r of projectRequirements) cats.add(r.category || 'כללי');
+      const sel = document.getElementById('ccFilterCategory');
+      sel.innerHTML = '<option value="all">כל הקטגוריות</option>' +
+        [...cats].map(c => `<option value="${c}">${c}</option>`).join('');
+    }
+
+    function ccRenderChecklist() {
+      const filterStatus = document.getElementById('ccFilterStatus').value;
+      const filterCat = document.getElementById('ccFilterCategory').value;
+      const filterMethod = document.getElementById('ccFilterMethod').value;
+
+      // Filter requirements
+      let filtered = projectRequirements.filter(r => {
+        const status = r.final_status || 'pending';
+        if (filterStatus !== 'all' && status !== filterStatus) return false;
+        if (filterCat !== 'all' && (r.category || 'כללי') !== filterCat) return false;
+        if (filterMethod !== 'all' && r.verification_method !== filterMethod) return false;
+        return true;
+      });
+
+      // Group by category
+      const groups = {};
+      for (const r of filtered) {
+        const cat = r.category || 'כללי';
+        if (!groups[cat]) groups[cat] = [];
+        groups[cat].push(r);
+      }
+
+      const container = document.getElementById('ccChecklist');
+      if (filtered.length === 0) {
+        container.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:40px;">אין דרישות תואמות לסינון</p>';
+        return;
+      }
+
+      container.innerHTML = Object.entries(groups).map(([cat, reqs]) => `
+        <div class="cc-category-group">
+          <div class="cc-category-header" onclick="this.classList.toggle('collapsed');this.nextElementSibling.classList.toggle('collapsed')">
+            <span class="cc-cat-name">${cat}</span>
+            <span class="cc-cat-count">${reqs.length} דרישות</span>
+            <span class="cc-cat-arrow">▼</span>
+          </div>
+          <div class="cc-category-items">
+            ${reqs.map(r => ccRenderReqItem(r)).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function ccRenderReqItem(req) {
+      const status = req.final_status || 'pending';
+      const statusIcons = { pass: '✓', fail: '✗', partial: '~', unclear: '?', pending: '○' };
+      const meta = METHOD_META[req.verification_method] || { icon: '?', label: '', cls: '' };
+
+      let findingHtml = '';
+      if (req.ai_result?.finding_he) {
+        findingHtml = `<div class="cc-req-finding">${req.ai_result.finding_he}</div>`;
+        if (req.ai_result.confidence != null) {
+          const confPct = Math.round(req.ai_result.confidence * 100);
+          findingHtml += `<div class="cc-req-confidence">
+            <span class="cc-req-conf-bar"><span class="cc-req-conf-fill" style="width:${confPct}%;background:${confPct>70?'var(--success)':confPct>40?'var(--warning)':'var(--danger)'}"></span></span>
+            ביטחון: ${confPct}%
+          </div>`;
+        }
+      }
+      if (req.human_result?.notes) {
+        findingHtml += `<div class="cc-req-finding" style="background:rgba(234,179,8,0.08);color:#fde68a;">👤 ${req.human_result.notes}</div>`;
+      }
+      if (req.document?.ai_verification?.finding_he) {
+        findingHtml += `<div class="cc-req-finding" style="background:rgba(168,85,247,0.08);color:#d8b4fe;">📄 ${req.document.ai_verification.finding_he}</div>`;
+      }
+
+      let actionHtml = ccRenderAction(req);
+
+      return `
+        <div class="cc-req-item ${status}" data-req-id="${req.id}">
+          <div class="cc-req-status">${statusIcons[status] || '○'}</div>
+          <div class="cc-req-body">
+            <div class="cc-req-title">
+              <span class="cc-req-id">${req.id}</span>
+              ${req.title_he || ''}
+              <span class="cc-method-badge ${meta.cls}">${meta.icon} ${meta.label}</span>
+              ${req.severity ? `<span class="cc-req-severity ${req.severity}">${req.severity === 'critical' ? 'קריטי' : req.severity === 'major' ? 'חשוב' : 'משני'}</span>` : ''}
+            </div>
+            <div class="cc-req-desc">${req.description_he || ''}</div>
+            ${req.regulation_reference ? `<div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:6px;">📖 ${req.regulation_reference}</div>` : ''}
+            ${findingHtml}
+            ${actionHtml}
+          </div>
+        </div>
+      `;
+    }
+
+    function ccRenderAction(req) {
+      const method = req.verification_method;
+      const status = req.final_status;
+
+      // ai_plan_check / measurement: Show override buttons if AI checked, or "waiting" if not
+      if (method === 'ai_plan_check' || method === 'measurement') {
+        if (req.ai_result) {
+          return `<div class="cc-req-action cc-human-verify">
+            <span style="font-size:0.8rem;color:var(--text-dim);">שינוי ידני:</span>
+            <button class="cc-action-btn ${status==='pass'?'active':''}" onclick="ccVerify('${req.id}','pass')">✓ עובר</button>
+            <button class="cc-action-btn ${status==='fail'?'active':''}" onclick="ccVerify('${req.id}','fail')">✗ נכשל</button>
+          </div>`;
+        }
+        return `<div class="cc-req-action"><span style="font-size:0.8rem;color:var(--text-dim);">⏳ ממתין לבדיקת AI מתכניות</span></div>`;
+      }
+
+      // ai_document_check: Upload document button
+      if (method === 'ai_document_check') {
+        if (req.document?.uploaded) {
+          return `<div class="cc-req-action">
+            <span class="cc-doc-uploaded">📎 ${req.document.filename || 'מסמך הועלה'}</span>
+            <button class="cc-action-btn ${status==='pass'?'active':''}" onclick="ccVerify('${req.id}','pass')">✓ עובר</button>
+            <button class="cc-action-btn ${status==='fail'?'active':''}" onclick="ccVerify('${req.id}','fail')">✗ נכשל</button>
+          </div>`;
+        }
+        return `<div class="cc-req-action">
+          <label class="cc-doc-upload-btn">
+            📄 העלה ${req.required_document || 'מסמך'}
+            <input type="file" style="display:none" accept=".pdf,.doc,.docx,.jpg,.png" onchange="ccUploadDoc('${req.id}', this)">
+          </label>
+          <button class="cc-action-btn" onclick="ccVerify('${req.id}','pass')">✓ אשר ידנית</button>
+        </div>`;
+      }
+
+      // human_verify: Checkbox with optional name/notes
+      if (method === 'human_verify') {
+        return `<div class="cc-req-action cc-human-verify">
+          <button class="cc-action-btn ${status==='pass'?'active':''}" onclick="ccVerify('${req.id}','pass')">✓ בוצע</button>
+          <button class="cc-action-btn ${status==='fail'?'active':''}" onclick="ccVerify('${req.id}','fail')">✗ לא בוצע</button>
+          <input type="text" placeholder="שם הבודק" id="verifier_${req.id}">
+        </div>`;
+      }
+
+      // external_approval: Upload + authority info
+      if (method === 'external_approval') {
+        const authority = req.approving_authority || 'גורם מאשר';
+        if (req.document?.uploaded) {
+          return `<div class="cc-req-action">
+            <span class="cc-doc-uploaded">📎 ${req.document.filename}</span>
+            <button class="cc-action-btn ${status==='pass'?'active':''}" onclick="ccVerify('${req.id}','pass')">✓ אושר</button>
+            <button class="cc-action-btn ${status==='fail'?'active':''}" onclick="ccVerify('${req.id}','fail')">✗ נדחה</button>
+          </div>`;
+        }
+        return `<div class="cc-req-action">
+          <span style="font-size:0.82rem;color:var(--text-dim);">נדרש אישור: <strong>${authority}</strong></span>
+          <label class="cc-doc-upload-btn">
+            📄 העלה אישור
+            <input type="file" style="display:none" accept=".pdf,.doc,.docx,.jpg,.png" onchange="ccUploadDoc('${req.id}', this)">
+          </label>
+          <button class="cc-action-btn" onclick="ccVerify('${req.id}','pass')">✓ אושר ידנית</button>
+        </div>`;
+      }
+
+      // Fallback
+      return `<div class="cc-req-action cc-human-verify">
+        <button class="cc-action-btn ${status==='pass'?'active':''}" onclick="ccVerify('${req.id}','pass')">✓ עובר</button>
+        <button class="cc-action-btn ${status==='fail'?'active':''}" onclick="ccVerify('${req.id}','fail')">✗ נכשל</button>
+      </div>`;
+    }
+
+    // ===== ACTIONS =====
+
+    async function ccVerify(reqId, status) {
+      const verifierInput = document.getElementById('verifier_' + reqId);
+      const verifiedBy = verifierInput ? verifierInput.value : '';
+
+      try {
+        const resp = await fetch(API_BASE.replace('/api', '') + `/api/compliance/${currentProjectId}/verify/${reqId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, verifiedBy, notes: '' })
+        });
+        const data = await resp.json();
+
+        // Update local state
+        const req = projectRequirements.find(r => r.id === reqId);
+        if (req) {
+          req.final_status = status;
+          req.human_result = { status, verified_by: verifiedBy, verified_at: Date.now() };
+        }
+
+        ccUpdateDashboard();
+        ccRenderChecklist();
+      } catch (err) {
+        console.error('Verify error:', err);
+      }
+    }
+
+    async function ccUploadDoc(reqId, input) {
+      const file = input.files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        input.parentElement.innerHTML = '⏳ מעבד...';
+
+        const resp = await fetch(API_BASE.replace('/api', '') + `/api/compliance/${currentProjectId}/check-document/${reqId}`, {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await resp.json();
+
+        // Update local state
+        const req = projectRequirements.find(r => r.id === reqId);
+        if (req) {
+          req.document = { uploaded: true, filename: file.name, ai_verification: data.verification };
+          if (!req.human_result) req.final_status = data.verification?.status || null;
+        }
+
+        ccUpdateDashboard();
+        ccRenderChecklist();
+      } catch (err) {
+        console.error('Doc upload error:', err);
+        alert('שגיאה בהעלאת מסמך');
+      }
+    }
+
+    function ccStartNewProject() {
+      currentProjectId = null;
+      projectRequirements = [];
+      referenceFiles = [];
+
+      document.getElementById('ccChecklistSection').style.display = 'none';
+      document.getElementById('ccExtractionSummary').style.display = 'none';
+
+      const step1 = document.getElementById('referenceStep');
+      step1.style.display = '';
+      step1.classList.remove('completed');
+      step1.classList.add('active');
+      document.getElementById('referenceUploadArea').style.display = '';
+      document.getElementById('uploadedReferenceFiles').innerHTML = '';
+      document.getElementById('processReferenceBtn').style.display = 'none';
+      document.getElementById('referenceFileInput').value = '';
+
+      const step2 = document.getElementById('planStep');
+      step2.style.display = '';
+      step2.classList.remove('active');
+      step2.classList.add('disabled');
+      document.getElementById('planFileInput').value = '';
+    }
+
+    function ccUpdateProgress(msg, pct) {
       document.getElementById('complianceProgressPct').textContent = pct + '%';
       document.getElementById('complianceProgressFill').style.width = pct + '%';
 
@@ -1952,183 +2535,6 @@
       step.className = 'progress-step active';
       step.innerHTML = '<span class="step-icon"><span class="spinner"></span></span> ' + msg;
       stepsDiv.appendChild(step);
-    }
-
-    function displayComplianceResults(data) {
-      const resultsSection = document.getElementById('complianceResults');
-      resultsSection.classList.add('active');
-
-      // Analysis method badge
-      const methodBadge = document.getElementById('complianceMethodBadge');
-      const methodLabel = document.getElementById('complianceMethodLabel');
-      const imageSource = document.getElementById('complianceImageSource');
-
-      if (data.analysisMethod === 'vector-render') {
-        methodBadge.style.display = 'flex';
-        methodLabel.className = 'method-badge vector';
-        methodLabel.innerHTML = '<span>📐</span><span>ניתוח וקטורי + תמונה</span>';
-        imageSource.textContent = 'רינדור וקטורי';
-        imageSource.className = 'source-badge vector';
-      } else if (data.analysisMethod === 'vision-high-res') {
-        methodBadge.style.display = 'flex';
-        methodLabel.className = 'method-badge vision';
-        methodLabel.innerHTML = '<span>👁️</span><span>ניתוח חזותי HD</span>';
-        imageSource.textContent = 'צילום APS';
-        imageSource.className = 'source-badge derivative';
-      } else {
-        methodBadge.style.display = 'flex';
-        methodLabel.className = 'method-badge';
-        methodLabel.style.background = 'linear-gradient(135deg, #6b7280, #4b5563)';
-        methodLabel.innerHTML = '<span>📝</span><span>ניתוח טקסטואלי בלבד</span>';
-        imageSource.textContent = 'אין תמונה';
-        imageSource.className = 'source-badge thumbnail';
-      }
-
-      // Plan preview - use full API URL for cross-origin image loading
-      const planPreview = document.getElementById('compliancePlanPreview');
-      const compImg = document.getElementById('compliancePlanImage');
-      const compImgWrap = compImg.parentElement;
-
-      // Add error handling for compliance plan image
-      compImg.onerror = () => {
-        console.error('Compliance plan image failed:', compImg.src);
-        compImgWrap.innerHTML = `
-          <div style="padding:40px;text-align:center;color:#ef4444;background:var(--bg-elevated);border-radius:12px;">
-            <div style="font-size:2rem;margin-bottom:12px;">⚠️</div>
-            <div>שגיאה בטעינת תמונת התכנית</div>
-            <div style="font-size:0.8rem;color:var(--text-dim);margin-top:8px;">נסה להעלות קובץ DXF במקום DWG</div>
-          </div>`;
-      };
-      compImg.onload = () => console.log('Compliance plan image loaded:', compImg.src);
-
-      if (data.screenshotId) {
-        planPreview.style.display = 'block';
-        // Use the preview endpoint with full Railway URL
-        const imgUrl = `${API_BASE}/preview/${data.screenshotId}`;
-        console.log('Loading compliance plan image:', imgUrl);
-        compImg.src = imgUrl;
-      } else if (data.screenshotUrl) {
-        // Fallback: construct full URL from relative path
-        planPreview.style.display = 'block';
-        const baseUrl = API_BASE.replace('/api', '');
-        const imgUrl = baseUrl + data.screenshotUrl;
-        console.log('Loading compliance plan image (fallback):', imgUrl);
-        compImg.src = imgUrl;
-      } else {
-        planPreview.style.display = 'none';
-        console.log('No screenshot available for compliance plan');
-      }
-
-      // Compliance score
-      const score = data.overallCompliance || 0;
-      const scoreCard = document.getElementById('complianceScoreCard');
-      scoreCard.className = 'compliance-score-card';
-      if (score >= 80) scoreCard.classList.add('high');
-      else if (score >= 50) scoreCard.classList.add('medium');
-      else scoreCard.classList.add('low');
-
-      document.getElementById('complianceScoreValue').textContent = score;
-      document.getElementById('planTypeBadge').textContent = data.planType || 'תכנית';
-
-      // Requirements checklist
-      const checklistItems = document.getElementById('checklistItems');
-      const results = data.results || [];
-
-      if (results.length === 0) {
-        checklistItems.innerHTML = '<p style="color: var(--text-muted); text-align: center;">לא נמצאו תוצאות בדיקה</p>';
-      } else {
-        checklistItems.innerHTML = results.map(result => {
-          const status = result.status || 'needs_review';
-          const statusIcon = status === 'pass' ? '✓' : (status === 'fail' ? '✗' : (status === 'not_applicable' ? '—' : '?'));
-
-          // Find original requirement
-          const req = projectRequirements.find(r => r.id === result.requirementId) || {};
-
-          return `
-            <div class="requirement-item ${status}">
-              <div class="req-status-icon">${statusIcon}</div>
-              <div class="req-content">
-                <div class="req-description">${req.description_he || result.requirementId}</div>
-                <div class="req-finding">${result.finding_he || ''}</div>
-                ${result.confidence ? `<div class="req-confidence">ביטחון: ${result.confidence}%</div>` : ''}
-              </div>
-            </div>
-          `;
-        }).join('');
-      }
-
-      // Detected objects
-      const objectsSection = document.getElementById('detectedObjectsSection');
-      const objects = data.detectedObjects;
-      if (objects) {
-        objectsSection.style.display = 'block';
-        const items = [
-          { k: 'sprinklers', l: 'ספרינקלרים', i: '💧', color: '#00ff00' },
-          { k: 'smokeDetectors', l: 'גלאי עשן', i: '🔔', color: '#ffff00' },
-          { k: 'fireExtinguishers', l: 'מטפים', i: '🧯', color: '#ff6600' },
-          { k: 'hydrants', l: 'הידרנטים', i: '🔴', color: '#ff0000' },
-          { k: 'fireDoors', l: 'דלתות אש', i: '🚪', color: '#ff00ff' },
-          { k: 'exits', l: 'יציאות', i: '🚪', color: '#00ffff' },
-          { k: 'stairs', l: 'מדרגות', i: '🪜', color: '#0066ff' },
-          { k: 'rooms', l: 'חדרים', i: '🏠', color: '#888' }
-        ];
-
-        document.getElementById('detectedObjectsGrid').innerHTML = items.map(item => {
-          const count = objects[item.k] || 0;
-          const cls = count > 0 ? 'highlight' : '';
-          return `<div class="vector-item ${cls}">
-            <div class="count" style="color: ${item.color}">${count}</div>
-            <div class="label">${item.i} ${item.l}</div>
-          </div>`;
-        }).join('');
-      } else {
-        objectsSection.style.display = 'none';
-      }
-
-      // Potential issues
-      const issuesBox = document.getElementById('complianceIssuesBox');
-      const issues = data.potentialIssues || [];
-      if (issues.length > 0) {
-        issuesBox.style.display = 'block';
-        document.getElementById('complianceIssuesList').innerHTML = issues.map(issue => `<li>${issue}</li>`).join('');
-      } else {
-        issuesBox.style.display = 'none';
-      }
-    }
-
-    function uploadAnotherPlan() {
-      // Reset results, show plan step
-      document.getElementById('complianceResults').classList.remove('active');
-      document.getElementById('referenceStep').style.display = '';
-      document.getElementById('planStep').style.display = '';
-      document.getElementById('planFileInput').value = '';
-    }
-
-    function startNewProject() {
-      // Reset everything
-      currentProjectId = null;
-      projectRequirements = [];
-      referenceFiles = [];
-
-      document.getElementById('complianceResults').classList.remove('active');
-
-      // Reset step 1
-      const step1 = document.getElementById('referenceStep');
-      step1.style.display = '';
-      step1.classList.remove('completed');
-      step1.classList.add('active');
-      document.getElementById('referenceUploadArea').style.display = '';
-      document.getElementById('uploadedReferenceFiles').innerHTML = '';
-      document.getElementById('requirementsSummary').style.display = 'none';
-      document.getElementById('processReferenceBtn').style.display = 'none';
-      document.getElementById('referenceFileInput').value = '';
-
-      // Reset step 2
-      const step2 = document.getElementById('planStep');
-      step2.style.display = '';
-      step2.classList.remove('active');
-      step2.classList.add('disabled');
-      document.getElementById('planFileInput').value = '';
     }
 
     let currentInstructionId = 'fire-safety';

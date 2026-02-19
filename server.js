@@ -39,6 +39,10 @@ const AdmZip = require('adm-zip');
 // DXF Analyzer
 const { analyzeDXFComplete, streamParseDXF, buildObjectTree, classifyFireSafety } = require('./dxf-analyzer');
 
+// Compliance Engine (smart categorization)
+const ComplianceEngine = require('./compliance-engine');
+let complianceEngine = null; // Initialized after ANTHROPIC_API_KEY is available
+
 // Puppeteer and Sharp for high-res capture
 let puppeteer, sharp;
 try { puppeteer = require('puppeteer'); } catch (e) { console.log('Puppeteer not available'); }
@@ -58,6 +62,11 @@ app.use(cors({ origin: true, credentials: true }));
 const APS_CLIENT_ID = process.env.APS_CLIENT_ID;
 const APS_CLIENT_SECRET = process.env.APS_CLIENT_SECRET;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+// Initialize compliance engine
+if (ANTHROPIC_API_KEY) {
+  complianceEngine = new ComplianceEngine(ANTHROPIC_API_KEY);
+}
 
 // Directories
 const tmpDir = os.tmpdir();
@@ -3471,7 +3480,197 @@ app.get('/api/reference/:projectId', (req, res) => {
   });
 });
 
-// ===== COMPLIANCE MODE: ANALYZE PLAN =====
+// ═══════════════════════════════════════════════════════
+// SMART COMPLIANCE CHECKER ENDPOINTS (compliance-engine.js)
+// ═══════════════════════════════════════════════════════
+
+// Create new compliance project
+app.post('/api/compliance/create', (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+  const projectId = complianceEngine.createProject();
+  res.json({ projectId });
+});
+
+// Upload reference documents — extract & categorize requirements
+app.post('/api/compliance/:projectId/reference', referenceUpload.array('files', 10), async (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+
+  try {
+    const { projectId } = req.params;
+    if (!complianceEngine.getProject(projectId)) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    console.log('\n========================================');
+    console.log('📋 SMART COMPLIANCE — Reference Upload');
+    console.log(`📁 ${req.files.length} files`);
+    console.log('========================================\n');
+
+    const result = await complianceEngine.processReferenceDoc(projectId, req.files);
+    res.json(result);
+  } catch (err) {
+    console.error('Compliance reference error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Upload plans — run AI checks on ai_plan_check + measurement items
+app.post('/api/compliance/:projectId/check-plans', upload.single('planFile'), async (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+
+  try {
+    const { projectId } = req.params;
+    const project = complianceEngine.getProject(projectId);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!req.file) return res.status(400).json({ error: 'No plan file uploaded' });
+
+    console.log('\n========================================');
+    console.log('📋 SMART COMPLIANCE — Plan Check');
+    console.log(`📁 ${req.file.originalname}`);
+    console.log('========================================\n');
+
+    const filePath = req.file.path;
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const outputDir = path.join(tmpDir, `compliance-render-${Date.now()}`);
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    // Reuse existing rendering pipeline
+    let planImages = [];
+    let screenshotUrl = null;
+    let screenshotId = null;
+    let analysisMetadata = {};
+
+    if (ext === '.dxf') {
+      const pythonResult = await renderDXFWithPython(filePath, outputDir);
+
+      if (pythonResult && pythonResult.mode === 'sections') {
+        // Flattened DXF with sections
+        screenshotId = uuidv4();
+        for (let i = 0; i < pythonResult.sections.length; i++) {
+          const sec = pythonResult.sections[i];
+          if (sec.buffer) {
+            planImages.push(sec.buffer);
+            const secPath = path.join(publicScreenshotsDir, `${screenshotId}_section_${i}.png`);
+            fs.writeFileSync(secPath, sec.buffer);
+          }
+        }
+        if (pythonResult.sections[0]?.buffer) {
+          const mainPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+          fs.writeFileSync(mainPath, pythonResult.sections[0].buffer);
+          screenshotUrl = `/screenshots/${screenshotId}.png`;
+        }
+        analysisMetadata = {
+          method: 'Flattened DXF Section Analysis',
+          sectionCount: pythonResult.sections.length,
+          entities: pythonResult.totalEntities,
+          isFlattened: true
+        };
+      } else if (pythonResult && pythonResult.buffer) {
+        // Standard DXF render
+        planImages.push(pythonResult.buffer);
+        screenshotId = uuidv4();
+        const mainPath = path.join(publicScreenshotsDir, `${screenshotId}.png`);
+        fs.writeFileSync(mainPath, pythonResult.buffer);
+        screenshotUrl = `/screenshots/${screenshotId}.png`;
+
+        // Also use zone images if available
+        if (pythonResult.zonesData) {
+          for (const z of pythonResult.zonesData) {
+            if (z.buffer) planImages.push(z.buffer);
+          }
+        }
+        analysisMetadata = {
+          method: 'DXF Python Render',
+          entities: pythonResult.metadata?.total_entities || 'unknown'
+        };
+      }
+
+      // Cleanup
+      try { fs.rmSync(outputDir, { recursive: true, force: true }); } catch (e) {}
+    }
+
+    // Limit to max 10 images to avoid huge API calls
+    if (planImages.length > 10) {
+      planImages = planImages.slice(0, 10);
+    }
+
+    // Run compliance check
+    const result = await complianceEngine.checkPlansAgainstRequirements(projectId, planImages);
+
+    res.json({
+      ...result,
+      screenshotId,
+      screenshotUrl,
+      analysisMetadata
+    });
+
+  } catch (err) {
+    console.error('Compliance plan check error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Upload a document to verify a specific requirement
+app.post('/api/compliance/:projectId/check-document/:reqId', referenceUpload.single('file'), async (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+
+  try {
+    const { projectId, reqId } = req.params;
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const buffer = fs.readFileSync(req.file.path);
+    const result = await complianceEngine.checkDocument(projectId, reqId, buffer, req.file.originalname);
+    res.json(result);
+  } catch (err) {
+    console.error('Compliance document check error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Human marks a requirement as verified
+app.post('/api/compliance/:projectId/verify/:reqId', express.json(), (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+
+  try {
+    const { projectId, reqId } = req.params;
+    const { status, verifiedBy, notes } = req.body;
+    complianceEngine.markAsVerified(projectId, reqId, status, verifiedBy, notes);
+    const summary = complianceEngine.getSummary(projectId);
+    res.json({ success: true, summary });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get full checklist
+app.get('/api/compliance/:projectId/checklist', (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+
+  try {
+    const checklist = complianceEngine.getChecklist(req.params.projectId);
+    res.json(checklist);
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Get project summary
+app.get('/api/compliance/:projectId/summary', (req, res) => {
+  if (!complianceEngine) return res.status(500).json({ error: 'Compliance engine not initialized' });
+
+  try {
+    const summary = complianceEngine.getSummary(req.params.projectId);
+    if (!summary) return res.status(404).json({ error: 'Project not found' });
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== COMPLIANCE MODE: ANALYZE PLAN (LEGACY) =====
 app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
   const startTime = Date.now();
   let tempFiles = [];
