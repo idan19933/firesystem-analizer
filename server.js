@@ -1672,6 +1672,7 @@ async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 8000,
+      temperature: 0,
       messages: [{
         role: 'user',
         content: [...images, textContent]
@@ -1758,6 +1759,7 @@ ${blockList}
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4000,
+        temperature: 0,
         messages: [{
           role: 'user',
           content: prompt
@@ -2078,6 +2080,7 @@ async function analyzeHybridZoneWithClaude(zone, analysisType = 'fire-safety') {
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
+      temperature: 0,
       messages: [{
         role: 'user',
         content: [
@@ -2578,6 +2581,7 @@ async function classifySectionsWithClaude(sections) {
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 500,
+          temperature: 0,
           messages: [{
             role: 'user',
             content: [
@@ -2936,6 +2940,7 @@ Return ONLY a JSON object:
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 8000,
+        temperature: 0,
         messages: [{
           role: 'user',
           content: [
@@ -3147,6 +3152,7 @@ async function analyzeDXFWithClaude(filePath, customPrompt) {
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 8000,
+      temperature: 0,
       messages: [{
         role: 'user',
         content: `${customPrompt || FIRE_SAFETY_VISION_PROMPT}\n\n=== נתוני DXF ===\n${analysis.reportText}`
@@ -3310,8 +3316,9 @@ app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), a
     console.log(`📁 ${req.files.length} files uploaded`);
     console.log('========================================\n');
 
-    // Extract text from all files
-    let allText = '';
+    // Extract text from all files — per-document budget to avoid mid-content truncation
+    const MAX_TOTAL_CHARS = 100000;
+    const docTexts = [];
     const fileNames = [];
 
     for (const file of req.files) {
@@ -3337,18 +3344,26 @@ app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), a
           content = fs.readFileSync(file.path, 'utf8');
         }
 
-        allText += `\n\n=== ${file.originalname} ===\n${content}`;
+        docTexts.push({ name: file.originalname, content });
         console.log(`   ✓ ${file.originalname}: ${content.length} chars`);
       } catch (e) {
         console.log(`   ✗ ${file.originalname}: ${e.message}`);
       }
     }
 
-    if (!allText.trim()) {
+    if (docTexts.length === 0 || docTexts.every(d => !d.content.trim())) {
       throw new Error('לא ניתן היה לחלץ טקסט מהקבצים');
     }
 
-    console.log(`📄 Total extracted: ${allText.length} chars`);
+    // Per-document budget: divide evenly, then trim each document to its budget
+    const perDocBudget = Math.floor(MAX_TOTAL_CHARS / docTexts.length);
+    let allText = '';
+    for (const doc of docTexts) {
+      const trimmed = doc.content.length > perDocBudget ? doc.content.substring(0, perDocBudget) + '\n[...קוצר...]' : doc.content;
+      allText += `\n\n=== ${doc.name} ===\n${trimmed}`;
+    }
+
+    console.log(`📄 Total extracted: ${allText.length} chars (budget: ${perDocBudget}/doc)`);
 
     // Send to Claude for requirement extraction
     console.log('🤖 Sending to Claude for requirement extraction...');
@@ -3363,9 +3378,10 @@ app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), a
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 8000,
+        temperature: 0,
         messages: [{
           role: 'user',
-          content: `${REFERENCE_EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText.substring(0, 100000)}`
+          content: `${REFERENCE_EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText}`
         }]
       })
     });
@@ -3700,6 +3716,7 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 8000,
+          temperature: 0,
           messages: [{
             role: 'user',
             content: [...images, textContent]
@@ -3737,6 +3754,7 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 8000,
+          temperature: 0,
           messages: [{
             role: 'user',
             content: `${compliancePrompt}\n\n=== נתוני DXF ===\n${analysis.reportText}`
@@ -3770,6 +3788,7 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 8000,
+          temperature: 0,
           messages: [{
             role: 'user',
             content: `${compliancePrompt}\n\nהערה: לא ניתן היה לעבד את התכנית ויזואלית. אנא סמן את כל הדרישות הוויזואליות כ-needs_review והסבר שנדרשת בדיקה ידנית.\n\nשם הקובץ: ${originalName}`
