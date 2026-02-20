@@ -17,80 +17,39 @@ try { XLSX = require('xlsx'); } catch (e) {}
 
 // ===== PROMPTS =====
 
-const EXTRACTION_PROMPT = `You are an Israeli building permit compliance expert.
+const EXTRACTION_PROMPT = `Extract every check item from this Israeli building permit compliance document.
 
-Read this regulatory document and extract EVERY requirement, condition, and rule mentioned.
-
-For EACH requirement, you MUST classify its verification_method as one of:
-
-1. "ai_plan_check" — Can be verified by looking at architectural drawings/plans.
-   Examples: fire doors exist, staircase width, number of exits, sprinkler layout,
-   setback distances, room dimensions, window placement, parking spaces shown.
-
-2. "ai_document_check" — Can be verified by reading a specific uploaded document.
-   Examples: structural engineer approval letter, fire authority sign-off,
-   environmental impact report, insurance certificate.
-   → Also specify "required_document" with the document name.
-
-3. "human_verify" — Requires physical inspection, payment confirmation,
-   or subjective judgment that can't be done from documents alone.
-   Examples: fee payment, physical site inspection, neighbor consent obtained,
-   construction quality check, actual measurements on site.
-
-4. "measurement" — Requires specific numeric measurements from plans that
-   AI can attempt but a human should verify.
-   Examples: building height ≤ 9m, setback from road ≥ 5m,
-   apartment area ≥ 80sqm, parking spot dimensions.
-
-5. "external_approval" — Requires a signed approval from an external authority.
-   Examples: כב"א approval, ועדה מקומית approval, IEC electrical approval,
-   water authority approval, municipality engineer sign-off.
-   → Also specify "approving_authority" with who needs to sign.
-
-Return as JSON:
+For EACH item return this COMPACT JSON (use short field names to save space):
 {
-  "project_info": {
-    "location": "...",
-    "plot": "...",
-    "plan_number": "...",
-    "applicant": "..."
-  },
-  "requirements": [
-    {
-      "id": "REQ-001",
-      "category": "קליטת בקשה | בקרת תכן | טופס 2 | טופס 4 | כב\\"א | תב\\"ע | כללי",
-      "title_he": "Short title in Hebrew",
-      "description_he": "Full requirement description in Hebrew",
-      "verification_method": "ai_plan_check | ai_document_check | human_verify | measurement | external_approval",
-      "required_document": "Document name if ai_document_check or external_approval",
-      "approving_authority": "Authority name if external_approval",
-      "plan_elements_to_check": ["list", "of", "things to look for in plans"],
-      "numeric_threshold": { "metric": "...", "operator": ">=", "value": 5, "unit": "m" },
-      "regulation_reference": "תקן 1220 / הנ\\"כ 536 / תב\\"ע 513 / etc.",
-      "severity": "critical | major | minor",
-      "stage": "pre_permit | design_review | form2 | form4 | ongoing"
-    }
-  ],
-  "summary": {
-    "total_requirements": 0,
-    "by_verification_method": {
-      "ai_plan_check": 0,
-      "ai_document_check": 0,
-      "human_verify": 0,
-      "measurement": 0,
-      "external_approval": 0
-    }
-  }
+  "id": "1.1",
+  "cat": "Section/category name",
+  "title": "Short title in Hebrew",
+  "desc": "Requirement text in Hebrew (max 100 chars)",
+  "method": "plan | doc | human | measure | approval",
+  "ref": "Regulation reference if mentioned",
+  "severity": "critical | major | minor",
+  "doc_needed": "Document name (only if method=doc or approval)",
+  "authority": "Authority name (only if method=approval)",
+  "threshold": "e.g. >=5m or <=9m (only if method=measure)"
 }
 
-IMPORTANT RULES:
-- Hebrew text must be in Hebrew, not transliterated
-- Every requirement needs a clear, actionable description
-- If a requirement has a numeric threshold, ALWAYS include it in numeric_threshold
-- "ai_plan_check" should ONLY be used for things actually visible in architectural drawings
-- When in doubt between "ai_plan_check" and "human_verify", choose "human_verify"
-- Group related requirements under the same category
-- Include the specific regulation/standard reference when mentioned in the document`;
+METHOD KEY:
+- "plan" = visible in architectural drawings (walls, doors, stairs, symbols, rooms, exits)
+- "measure" = needs specific measurements from plans (areas, widths, heights, distances)
+- "human" = needs physical inspection, payment, or subjective judgment
+- "doc" = needs a separate uploaded document (certificate, letter, report)
+- "approval" = needs signed approval from external authority (כב"א, עירייה, IEC etc.)
+
+RULES:
+- Extract ALL items from ALL sections — do NOT skip any
+- Hebrew text in Hebrew, not transliterated
+- Use SHORT field names as shown above
+- Keep desc under 100 characters
+- Omit optional fields (doc_needed, authority, threshold) when not applicable
+- "plan" = ONLY for things actually visible in architectural drawings
+- When in doubt between "plan" and "human", choose "human"
+- Return ONLY valid JSON: {"requirements": [...], "project_info": {...}}
+- No markdown, no code blocks, no explanation outside JSON`;
 
 const PLAN_CHECK_PROMPT = `You are checking architectural plans for an Israeli building permit.
 
@@ -209,7 +168,15 @@ class ComplianceEngine {
 
   // ===== CLAUDE API HELPER =====
 
-  async _callClaude(messages, maxTokens = 8000) {
+  async _callClaude(messages, maxTokens = 8000, { systemPrompt = null, returnMeta = false } = {}) {
+    const body = {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: maxTokens,
+      temperature: 0,
+      messages
+    };
+    if (systemPrompt) body.system = systemPrompt;
+
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -217,12 +184,7 @@ class ComplianceEngine {
         'x-api-key': this.apiKey,
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: maxTokens,
-        temperature: 0,
-        messages
-      })
+      body: JSON.stringify(body)
     });
 
     if (!resp.ok) {
@@ -231,59 +193,144 @@ class ComplianceEngine {
     }
 
     const data = await resp.json();
-    return data.content[0].text;
+    const text = data.content[0].text;
+    const stopReason = data.stop_reason;
+
+    if (stopReason === 'max_tokens') {
+      console.warn(`⚠️ Response TRUNCATED (hit ${maxTokens} max_tokens) — JSON may be incomplete`);
+    }
+    console.log(`📊 Response: ${text.length} chars, stop_reason: ${stopReason}`);
+
+    if (returnMeta) return { text, stopReason };
+    return text;
   }
 
   _parseJSON(text) {
-    // Try to extract JSON from response
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('No valid JSON found in response');
+    if (!text || text.trim().length === 0) {
+      throw new Error('Empty response from Claude');
     }
 
-    let jsonStr = jsonMatch[0];
-
-    // Try direct parse first
+    // Strategy 1: Direct JSON parse
     try {
-      return JSON.parse(jsonStr);
-    } catch (e) {
-      console.log(`⚠️ JSON parse failed, attempting repair: ${e.message}`);
-    }
-
-    // Repair truncated JSON: close unclosed arrays and objects
-    // Count open/close braces and brackets
-    let braces = 0, brackets = 0;
-    let inString = false, escaped = false;
-    for (let i = 0; i < jsonStr.length; i++) {
-      const ch = jsonStr[i];
-      if (escaped) { escaped = false; continue; }
-      if (ch === '\\') { escaped = true; continue; }
-      if (ch === '"') { inString = !inString; continue; }
-      if (inString) continue;
-      if (ch === '{') braces++;
-      else if (ch === '}') braces--;
-      else if (ch === '[') brackets++;
-      else if (ch === ']') brackets--;
-    }
-
-    // Trim trailing incomplete entries (cut at last complete object/value)
-    // Find last complete entry by looking for last '}' or '"' before truncation
-    if (braces > 0 || brackets > 0) {
-      // Remove trailing partial entry (after last comma in an array/object context)
-      const lastComma = jsonStr.lastIndexOf(',');
-      if (lastComma > jsonStr.length * 0.5) {
-        jsonStr = jsonStr.substring(0, lastComma);
+      const result = JSON.parse(text);
+      if (result.requirements && result.requirements.length > 0) {
+        console.log(`✅ JSON Strategy 1 (direct): ${result.requirements.length} requirements`);
+        return result;
       }
-      // Close unclosed brackets and braces
-      jsonStr += ']'.repeat(Math.max(0, brackets)) + '}'.repeat(Math.max(0, braces));
+      if (typeof result === 'object') return result;
+    } catch (e) { /* try next */ }
+
+    // Strategy 2: Extract from markdown code block
+    try {
+      const codeBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+      if (codeBlockMatch) {
+        const result = JSON.parse(codeBlockMatch[1]);
+        if (result.requirements && result.requirements.length > 0) {
+          console.log(`✅ JSON Strategy 2 (code block): ${result.requirements.length} requirements`);
+          return result;
+        }
+        if (typeof result === 'object') return result;
+      }
+    } catch (e) { /* try next */ }
+
+    // Strategy 3: Balanced brace extraction — find the outermost { }
+    try {
+      const startIdx = text.indexOf('{');
+      if (startIdx >= 0) {
+        let depth = 0;
+        let inStr = false, esc = false;
+        let endIdx = -1;
+        for (let i = startIdx; i < text.length; i++) {
+          const ch = text[i];
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = !inStr; continue; }
+          if (inStr) continue;
+          if (ch === '{') depth++;
+          if (ch === '}') { depth--; if (depth === 0) { endIdx = i; break; } }
+        }
+        if (endIdx > startIdx) {
+          const result = JSON.parse(text.substring(startIdx, endIdx + 1));
+          if (result.requirements && result.requirements.length > 0) {
+            console.log(`✅ JSON Strategy 3 (balanced): ${result.requirements.length} requirements`);
+            return result;
+          }
+          if (typeof result === 'object') return result;
+        }
+      }
+    } catch (e) { /* try next */ }
+
+    // Strategy 4: Truncation recovery — salvage complete requirement objects
+    try {
+      console.log('⚠️ Trying truncation recovery (Strategy 4)...');
+      const reqIdx = text.indexOf('"requirements"');
+      if (reqIdx >= 0) {
+        const arrStart = text.indexOf('[', reqIdx);
+        if (arrStart >= 0) {
+          // Walk through and find all complete objects
+          let depth = 0, inStr = false, esc = false;
+          let lastCompleteObj = -1;
+          for (let i = arrStart + 1; i < text.length; i++) {
+            const ch = text[i];
+            if (esc) { esc = false; continue; }
+            if (ch === '\\') { esc = true; continue; }
+            if (ch === '"') { inStr = !inStr; continue; }
+            if (inStr) continue;
+            if (ch === '{') depth++;
+            if (ch === '}') { depth--; if (depth === 0) lastCompleteObj = i; }
+            if (ch === ']' && depth === 0) { lastCompleteObj = i; break; }
+          }
+
+          if (lastCompleteObj > arrStart) {
+            let arrayStr = text.substring(arrStart, lastCompleteObj + 1);
+            if (!arrayStr.trim().endsWith(']')) {
+              const lastBrace = arrayStr.lastIndexOf('}');
+              if (lastBrace > 0) arrayStr = arrayStr.substring(0, lastBrace + 1) + ']';
+            }
+            const requirements = JSON.parse(arrayStr);
+            if (Array.isArray(requirements) && requirements.length > 0) {
+              console.log(`✅ JSON Strategy 4 (truncation recovery): ${requirements.length} requirements`);
+              return { requirements, _truncated: true };
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Strategy 4 failed:', e.message);
     }
 
+    // Strategy 5: Greedy regex with repair (last resort)
     try {
-      return JSON.parse(jsonStr);
-    } catch (e2) {
-      console.log(`⚠️ JSON repair failed: ${e2.message}`);
-      throw new Error(`JSON parse failed even after repair: ${e2.message}`);
-    }
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        let jsonStr = jsonMatch[0];
+        // Count unclosed braces/brackets
+        let braces = 0, brackets = 0, inStr = false, esc = false;
+        for (let i = 0; i < jsonStr.length; i++) {
+          const ch = jsonStr[i];
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = !inStr; continue; }
+          if (inStr) continue;
+          if (ch === '{') braces++; else if (ch === '}') braces--;
+          if (ch === '[') brackets++; else if (ch === ']') brackets--;
+        }
+        if (braces > 0 || brackets > 0) {
+          const lastComma = jsonStr.lastIndexOf(',');
+          if (lastComma > jsonStr.length * 0.5) jsonStr = jsonStr.substring(0, lastComma);
+          jsonStr += ']'.repeat(Math.max(0, brackets)) + '}'.repeat(Math.max(0, braces));
+        }
+        const result = JSON.parse(jsonStr);
+        console.log(`✅ JSON Strategy 5 (greedy+repair): ${(result.requirements || []).length} requirements`);
+        return result;
+      }
+    } catch (e) { /* give up */ }
+
+    // ALL STRATEGIES FAILED
+    console.error('❌ All 5 JSON parsing strategies failed');
+    console.error('First 500 chars:', text.substring(0, 500));
+    console.error('Last 300 chars:', text.substring(text.length - 300));
+    throw new Error('All JSON parsing strategies failed');
   }
 
   // ===== PHASE 1: EXTRACT & CATEGORIZE REQUIREMENTS =====
@@ -343,27 +390,65 @@ class ComplianceEngine {
 
     console.log(`📄 Total: ${allText.length} chars (budget: ${perDocBudget}/doc)`);
 
-    // Send to Claude for extraction
+    // Single-pass extraction with truncation detection
     console.log('🤖 Extracting & categorizing requirements...');
-    const responseText = await this._callClaude([{
+    const { text: responseText, stopReason } = await this._callClaude([{
       role: 'user',
       content: `${EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText}`
-    }], 16000);
+    }], 16000, {
+      systemPrompt: 'You are a JSON extraction engine. Output ONLY valid JSON. Never output markdown, explanations, or text outside of JSON.',
+      returnMeta: true
+    });
 
-    const parsed = this._parseJSON(responseText);
+    let parsed = this._parseJSON(responseText);
+    let reqs = parsed.requirements || [];
 
-    // Normalize requirement IDs (sort by category + regulation ref for determinism)
-    const reqs = (parsed.requirements || []);
+    // Normalize compact field names → standard names
+    reqs = reqs.map(r => ({
+      category: r.cat || r.category || 'כללי',
+      title_he: r.title || r.title_he || '',
+      description_he: r.desc || r.description_he || r.title || '',
+      verification_method: this._normalizeMethod(r.method || r.verification_method),
+      required_document: r.doc_needed || r.required_document || null,
+      approving_authority: r.authority || r.approving_authority || null,
+      regulation_reference: r.ref || r.regulation_reference || '',
+      severity: r.severity || 'major',
+      numeric_threshold: r.threshold || r.numeric_threshold || null,
+      plan_elements_to_check: r.plan_elements_to_check || [],
+      _originalId: r.id || ''
+    }));
+
+    console.log(`📋 Single-pass extracted: ${reqs.length} requirements`);
+
+    // If truncated or too few items, try section-by-section fallback
+    if ((stopReason === 'max_tokens' || reqs.length < 80 || parsed._truncated) && allText.length > 5000) {
+      console.log(`⚠️ Single-pass got ${reqs.length} items (truncated: ${stopReason === 'max_tokens'}). Trying section-by-section...`);
+      try {
+        const sectionReqs = await this._extractBySection(allText);
+        if (sectionReqs.length > reqs.length) {
+          console.log(`✅ Section-by-section got ${sectionReqs.length} items (vs ${reqs.length}). Using section results.`);
+          reqs = sectionReqs;
+        }
+      } catch (e) {
+        console.log(`⚠️ Section-by-section failed: ${e.message}. Using single-pass results.`);
+      }
+    }
+
+    // Validate extraction
+    this._validateExtraction(reqs);
+
+    // Sort by category + original id for determinism
     reqs.sort((a, b) => {
       const catA = a.category || '';
       const catB = b.category || '';
       if (catA !== catB) return catA.localeCompare(catB, 'he');
-      return (a.regulation_reference || '').localeCompare(b.regulation_reference || '', 'he');
+      return (a._originalId || '').localeCompare(b._originalId || '');
     });
 
     // Re-assign sequential IDs
     reqs.forEach((req, i) => {
       req.id = `REQ-${String(i + 1).padStart(3, '0')}`;
+      delete req._originalId;
       // Initialize result fields
       req.ai_result = null;
       req.human_result = null;
@@ -384,6 +469,125 @@ class ComplianceEngine {
       totalRequirements: reqs.length,
       summary: this.getSummary(projectId)
     };
+  }
+
+  // Normalize short method names to standard names
+  _normalizeMethod(method) {
+    const map = {
+      'plan': 'ai_plan_check',
+      'doc': 'ai_document_check',
+      'human': 'human_verify',
+      'measure': 'measurement',
+      'approval': 'external_approval'
+    };
+    return map[method] || method || 'human_verify';
+  }
+
+  // Section-by-section extraction for large documents
+  async _extractBySection(allText) {
+    // Step 1: Identify sections
+    console.log('   📋 Identifying sections...');
+    const sectionListText = await this._callClaude([{
+      role: 'user',
+      content: `Read this document and list ONLY the section numbers and names.
+Return a JSON array: [{"num": 1, "name": "Section name", "items": 10}, ...]
+Return ONLY valid JSON array, nothing else.
+
+DOCUMENT:
+${allText.substring(0, 30000)}`
+    }], 2000, { systemPrompt: 'Output ONLY valid JSON. No markdown.' });
+
+    let sections;
+    try {
+      const arrMatch = sectionListText.match(/\[[\s\S]*\]/);
+      sections = arrMatch ? JSON.parse(arrMatch[0]) : [];
+    } catch (e) {
+      console.log(`   ⚠️ Section identification failed: ${e.message}`);
+      return [];
+    }
+
+    if (sections.length === 0) return [];
+    console.log(`   📋 Found ${sections.length} sections`);
+
+    // Step 2: Extract requirements section by section
+    const allReqs = [];
+    for (const section of sections) {
+      console.log(`   → Section ${section.num}: ${section.name}...`);
+      try {
+        const sectionText = await this._callClaude([{
+          role: 'user',
+          content: `Extract ALL requirements from SECTION ${section.num} ("${section.name}") of this checklist.
+
+For each item return COMPACT JSON:
+{"id":"${section.num}.X","cat":"${section.name}","title":"Short title","desc":"Requirement (Hebrew, max 100 chars)","method":"plan|doc|human|measure|approval","ref":"Regulation ref","severity":"critical|major|minor"}
+
+Omit optional fields when not applicable.
+Return ONLY a JSON array: [...]
+
+DOCUMENT:
+${allText}`
+        }], 4000, { systemPrompt: 'Output ONLY valid JSON array. No markdown.' });
+
+        let sectionReqs;
+        try {
+          const arrMatch = sectionText.match(/\[[\s\S]*\]/);
+          sectionReqs = arrMatch ? JSON.parse(arrMatch[0]) : [];
+        } catch (e) {
+          // Try repair
+          const parsed = this._parseJSON(`{"requirements": ${sectionText}}`);
+          sectionReqs = parsed.requirements || [];
+        }
+
+        if (Array.isArray(sectionReqs)) {
+          // Normalize fields
+          const normalized = sectionReqs.map(r => ({
+            category: r.cat || r.category || section.name,
+            title_he: r.title || r.title_he || '',
+            description_he: r.desc || r.description_he || r.title || '',
+            verification_method: this._normalizeMethod(r.method || r.verification_method),
+            required_document: r.doc_needed || r.required_document || null,
+            approving_authority: r.authority || r.approving_authority || null,
+            regulation_reference: r.ref || r.regulation_reference || '',
+            severity: r.severity || 'major',
+            numeric_threshold: r.threshold || r.numeric_threshold || null,
+            plan_elements_to_check: r.plan_elements_to_check || [],
+            _originalId: r.id || `${section.num}.${sectionReqs.indexOf(r) + 1}`
+          }));
+          allReqs.push(...normalized);
+          console.log(`     ✅ ${normalized.length} requirements`);
+        }
+      } catch (e) {
+        console.error(`     ❌ Section ${section.num} failed: ${e.message}`);
+      }
+    }
+
+    return allReqs;
+  }
+
+  // Validate extraction results
+  _validateExtraction(reqs) {
+    if (reqs.length === 0) {
+      console.error('❌ ZERO requirements extracted — this is a bug');
+      return;
+    }
+
+    if (reqs.length < 50) {
+      console.warn(`⚠️ Only ${reqs.length} requirements — may be incomplete (expected ~130 for full checklist)`);
+    } else {
+      console.log(`✅ Extracted ${reqs.length} requirements`);
+    }
+
+    // Check method distribution
+    const methods = {};
+    reqs.forEach(r => {
+      const m = r.verification_method || 'unknown';
+      methods[m] = (methods[m] || 0) + 1;
+    });
+    console.log('📊 By verification method:', JSON.stringify(methods));
+
+    // Check categories covered
+    const categories = [...new Set(reqs.map(r => r.category))];
+    console.log(`📊 Categories (${categories.length}): ${categories.join(', ')}`);
   }
 
   // ===== PHASE 2: CHECK PLANS (ai_plan_check + measurement items only) =====

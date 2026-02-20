@@ -122,6 +122,115 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
+// ===== ROBUST JSON PARSER =====
+function robustParseJSON(text) {
+  if (!text || text.trim().length === 0) {
+    throw new Error('Empty response');
+  }
+
+  // Strategy 1: Direct parse
+  try {
+    const result = JSON.parse(text);
+    if (typeof result === 'object') {
+      console.log(`✅ JSON Strategy 1 (direct): ${(result.requirements || []).length} requirements`);
+      return result;
+    }
+  } catch (e) { /* try next */ }
+
+  // Strategy 2: Code block extraction
+  try {
+    const codeBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (codeBlockMatch) {
+      const result = JSON.parse(codeBlockMatch[1]);
+      console.log(`✅ JSON Strategy 2 (code block): ${(result.requirements || []).length} requirements`);
+      return result;
+    }
+  } catch (e) { /* try next */ }
+
+  // Strategy 3: Balanced brace extraction
+  try {
+    const startIdx = text.indexOf('{');
+    if (startIdx >= 0) {
+      let depth = 0, inStr = false, esc = false, endIdx = -1;
+      for (let i = startIdx; i < text.length; i++) {
+        const ch = text[i];
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (ch === '{') depth++;
+        if (ch === '}') { depth--; if (depth === 0) { endIdx = i; break; } }
+      }
+      if (endIdx > startIdx) {
+        const result = JSON.parse(text.substring(startIdx, endIdx + 1));
+        console.log(`✅ JSON Strategy 3 (balanced): ${(result.requirements || []).length} requirements`);
+        return result;
+      }
+    }
+  } catch (e) { /* try next */ }
+
+  // Strategy 4: Truncation recovery — salvage complete objects from requirements array
+  try {
+    const reqIdx = text.indexOf('"requirements"');
+    if (reqIdx >= 0) {
+      const arrStart = text.indexOf('[', reqIdx);
+      if (arrStart >= 0) {
+        let depth = 0, inStr = false, esc = false, lastComplete = -1;
+        for (let i = arrStart + 1; i < text.length; i++) {
+          const ch = text[i];
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = !inStr; continue; }
+          if (inStr) continue;
+          if (ch === '{') depth++;
+          if (ch === '}') { depth--; if (depth === 0) lastComplete = i; }
+          if (ch === ']' && depth === 0) { lastComplete = i; break; }
+        }
+        if (lastComplete > arrStart) {
+          let arrayStr = text.substring(arrStart, lastComplete + 1);
+          if (!arrayStr.trim().endsWith(']')) {
+            const lb = arrayStr.lastIndexOf('}');
+            if (lb > 0) arrayStr = arrayStr.substring(0, lb + 1) + ']';
+          }
+          const requirements = JSON.parse(arrayStr);
+          if (Array.isArray(requirements) && requirements.length > 0) {
+            console.log(`✅ JSON Strategy 4 (truncation recovery): ${requirements.length} requirements`);
+            return { requirements, _truncated: true };
+          }
+        }
+      }
+    }
+  } catch (e) { /* try next */ }
+
+  // Strategy 5: Greedy regex + repair
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      let jsonStr = jsonMatch[0];
+      let braces = 0, brackets = 0, inStr = false, esc = false;
+      for (let i = 0; i < jsonStr.length; i++) {
+        const ch = jsonStr[i];
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (ch === '{') braces++; else if (ch === '}') braces--;
+        if (ch === '[') brackets++; else if (ch === ']') brackets--;
+      }
+      if (braces > 0 || brackets > 0) {
+        const lc = jsonStr.lastIndexOf(',');
+        if (lc > jsonStr.length * 0.5) jsonStr = jsonStr.substring(0, lc);
+        jsonStr += ']'.repeat(Math.max(0, brackets)) + '}'.repeat(Math.max(0, braces));
+      }
+      const result = JSON.parse(jsonStr);
+      console.log(`✅ JSON Strategy 5 (greedy+repair): ${(result.requirements || []).length} requirements`);
+      return result;
+    }
+  } catch (e) { /* give up */ }
+
+  throw new Error('All 5 JSON parsing strategies failed');
+}
+
 // ===== COMPLIANCE PROMPTS =====
 const REFERENCE_EXTRACTION_PROMPT = `אתה מומחה היתרי בנייה ישראלי. קרא את מסמך הייחוס הזה וחלץ רשימה מובנית של כל הדרישות, כללים ותנאים שמוזכרים.
 
@@ -3434,8 +3543,9 @@ app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), a
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 8000,
+        max_tokens: 16000,
         temperature: 0,
+        system: 'You are a JSON extraction engine. Output ONLY valid JSON. Never output markdown or text outside of JSON.',
         messages: [{
           role: 'user',
           content: `${REFERENCE_EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText}`
@@ -3450,18 +3560,19 @@ app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), a
 
     const data = await resp.json();
     const content = data.content[0].text;
+    const stopReason = data.stop_reason;
 
-    // Parse JSON response
+    console.log(`📊 Response: ${content.length} chars, stop_reason: ${stopReason}`);
+    if (stopReason === 'max_tokens') {
+      console.warn('⚠️ Response TRUNCATED — JSON may be incomplete');
+    }
+
+    // Robust JSON parsing with truncation recovery
     let extracted;
     try {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        extracted = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error('No JSON in response');
-      }
+      extracted = robustParseJSON(content);
     } catch (e) {
-      console.log('   JSON parse failed, creating minimal structure');
+      console.log(`❌ All JSON parsing strategies failed: ${e.message}`);
       extracted = {
         requirements: [],
         numericLimits: {},
