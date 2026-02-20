@@ -122,6 +122,41 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
+// ===== CLAUDE API WITH RETRY =====
+async function callClaudeAPI(body, maxRetries = 3) {
+  const RETRYABLE = [429, 500, 502, 503, 529];
+  const baseDelay = 5000;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (resp.ok) {
+      return await resp.json();
+    }
+
+    const errText = await resp.text();
+    const isRetryable = RETRYABLE.includes(resp.status) ||
+      errText.includes('overloaded') || errText.includes('Overloaded');
+
+    if (isRetryable && attempt < maxRetries) {
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      console.log(`⚠️ Claude API ${resp.status} — retry ${attempt}/${maxRetries} in ${delay / 1000}s...`);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+
+    throw new Error(`Claude API error: ${resp.status} - ${errText}`);
+  }
+}
+
 // ===== ROBUST JSON PARSER =====
 function robustParseJSON(text) {
   if (!text || text.trim().length === 0) {
@@ -1785,30 +1820,15 @@ async function analyzeWithClaudeVision(fullImage, zones, customPrompt = null) {
 נתח את כל התמונות ביחד וצור דוח מקיף.`
   };
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000,
-      temperature: 0,
-      messages: [{
-        role: 'user',
-        content: [...images, textContent]
-      }]
-    })
+  const data = await callClaudeAPI({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 8000,
+    temperature: 0,
+    messages: [{
+      role: 'user',
+      content: [...images, textContent]
+    }]
   });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Claude API error: ${resp.status} - ${err}`);
-  }
-
-  const data = await resp.json();
   const content = data.content[0].text;
 
   console.log('✅ Vision analysis complete');
@@ -1872,30 +1892,15 @@ ${blockList}
 }`;
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4000,
-        temperature: 0,
-        messages: [{
-          role: 'user',
-          content: prompt
-        }]
-      })
+    const data = await callClaudeAPI({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      temperature: 0,
+      messages: [{
+        role: 'user',
+        content: prompt
+      }]
     });
-
-    if (!resp.ok) {
-      console.log('⚠️ Block classification API error');
-      return {};
-    }
-
-    const data = await resp.json();
     const content = data.content[0].text;
 
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -2231,14 +2236,9 @@ async function analyzeHybridZoneWithClaude(zone, analysisType = 'fire-safety') {
     return { zone_id: zone.zone_id || 'unknown', error: prepErr.message, findings: [], objectCounts: {} };
   }
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
+  let data;
+  try {
+    data = await callClaudeAPI({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
       temperature: 0,
@@ -2259,16 +2259,11 @@ async function analyzeHybridZoneWithClaude(zone, analysisType = 'fire-safety') {
           }
         ]
       }]
-    })
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    console.log(`⚠️ Claude API error for ${zone.zone_id}: ${resp.status}`);
-    return { zone_id: zone.zone_id, error: err, findings: [] };
+    });
+  } catch (apiErr) {
+    console.log(`⚠️ Claude API error for ${zone.zone_id}: ${apiErr.message}`);
+    return { zone_id: zone.zone_id, error: apiErr.message, findings: [], objectCounts: {} };
   }
-
-  const data = await resp.json();
   const content = (data.content && data.content[0] && data.content[0].text) || '';
 
   try {
@@ -2737,27 +2732,20 @@ async function classifySectionsWithClaude(sections) {
       const base64 = section.buffer.toString('base64');
       const mediaType = 'image/png';
 
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 500,
-          temperature: 0,
-          messages: [{
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: { type: 'base64', media_type: mediaType, data: base64 }
-              },
-              {
-                type: 'text',
-                text: `This is one section from a multi-sheet Israeli building plan (תוכנית בנייה).
+      const data = await callClaudeAPI({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        temperature: 0,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mediaType, data: base64 }
+            },
+            {
+              type: 'text',
+              text: `This is one section from a multi-sheet Israeli building plan (תוכנית בנייה).
 
 Classify this section. Common types in Israeli building plans:
 - "water_schematic" — pipe layout, סכמת מים, VORTEX PLATE
@@ -2773,25 +2761,19 @@ Return ONLY JSON:
 {"type":"water_schematic|floor_plan|elevation|building_section|roof_plan|site_plan|notes_legend|detail","confidence":0-100,"fire_relevant":"critical|high|medium|low"}
 
 IMPORTANT: If you see room layouts with walls and dimensions, it's a floor_plan. If you see a facade/front of building, it's an elevation. If you see text tables and notes, it's notes_legend (mark as "critical" fire relevance). If you see pipes and water flow, it's water_schematic (mark as "critical").`
-              }
-            ]
-          }]
-        })
+            }
+          ]
+        }]
       });
 
-      if (resp.ok) {
-        const data = await resp.json();
-        const content = data.content[0].text;
-        // Strip markdown code fences if present
-        const cleanContent = content.replace(/```json\s*/g, '').replace(/```\s*/g, '');
-        const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const classification = JSON.parse(jsonMatch[0]);
-          classifiedSections.push({ ...section, classification });
-          console.log(`   Section ${section.sectionId}: ${classification.type} (${classification.fire_relevant || 'unknown'})`);
-        } else {
-          classifiedSections.push({ ...section, classification: { type: 'unknown' } });
-        }
+      const content = data.content[0].text;
+      // Strip markdown code fences if present
+      const cleanContent = content.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+      const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const classification = JSON.parse(jsonMatch[0]);
+        classifiedSections.push({ ...section, classification });
+        console.log(`   Section ${section.sectionId}: ${classification.type} (${classification.fire_relevant || 'unknown'})`);
       } else {
         classifiedSections.push({ ...section, classification: { type: 'unknown' } });
       }
@@ -3096,32 +3078,18 @@ Return ONLY a JSON object:
 }`;
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 8000,
-        temperature: 0,
-        messages: [{
-          role: 'user',
-          content: [
-            ...imageContents,
-            { type: 'text', text: prompt }
-          ]
-        }]
-      })
+    const data = await callClaudeAPI({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 8000,
+      temperature: 0,
+      messages: [{
+        role: 'user',
+        content: [
+          ...imageContents,
+          { type: 'text', text: prompt }
+        ]
+      }]
     });
-
-    if (!resp.ok) {
-      throw new Error(`Claude API error: ${resp.status}`);
-    }
-
-    const data = await resp.json();
     let content = data.content[0].text;
 
     // Strip markdown code fences if present
@@ -3308,26 +3276,15 @@ function extractFromZip(filePath, originalName) {
 async function analyzeDXFWithClaude(filePath, customPrompt) {
   const analysis = await analyzeDXFComplete(filePath);
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000,
-      temperature: 0,
-      messages: [{
-        role: 'user',
-        content: `${customPrompt || FIRE_SAFETY_VISION_PROMPT}\n\n=== נתוני DXF ===\n${analysis.reportText}`
-      }]
-    })
+  const data = await callClaudeAPI({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 8000,
+    temperature: 0,
+    messages: [{
+      role: 'user',
+      content: `${customPrompt || FIRE_SAFETY_VISION_PROMPT}\n\n=== נתוני DXF ===\n${analysis.reportText}`
+    }]
   });
-
-  if (!resp.ok) throw new Error(`Claude API error: ${resp.status}`);
-  const data = await resp.json();
   const content = data.content[0].text;
 
   try {
@@ -3534,31 +3491,16 @@ app.post('/api/reference/upload', referenceUpload.array('referenceFiles', 10), a
     // Send to Claude for requirement extraction
     console.log('🤖 Sending to Claude for requirement extraction...');
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 16000,
-        temperature: 0,
-        system: 'You are a JSON extraction engine. Output ONLY valid JSON. Never output markdown or text outside of JSON.',
-        messages: [{
-          role: 'user',
-          content: `${REFERENCE_EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText}`
-        }]
-      })
+    const data = await callClaudeAPI({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 16000,
+      temperature: 0,
+      system: 'You are a JSON extraction engine. Output ONLY valid JSON. Never output markdown or text outside of JSON.',
+      messages: [{
+        role: 'user',
+        content: `${REFERENCE_EXTRACTION_PROMPT}\n\n=== תוכן המסמכים ===\n${allText}`
+      }]
     });
-
-    if (!resp.ok) {
-      const err = await resp.text();
-      throw new Error(`Claude API error: ${resp.status} - ${err}`);
-    }
-
-    const data = await resp.json();
     const content = data.content[0].text;
     const stopReason = data.stop_reason;
 
@@ -4064,30 +4006,15 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
         text: `${compliancePrompt}\n\nהתמונה הראשונה היא התכנית המלאה. 9 התמונות הבאות הן זומים על אזורים שונים.`
       };
 
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 8000,
-          temperature: 0,
-          messages: [{
-            role: 'user',
-            content: [...images, textContent]
-          }]
-        })
+      const data = await callClaudeAPI({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 8000,
+        temperature: 0,
+        messages: [{
+          role: 'user',
+          content: [...images, textContent]
+        }]
       });
-
-      if (!resp.ok) {
-        const err = await resp.text();
-        throw new Error(`Claude API error: ${resp.status} - ${err}`);
-      }
-
-      const data = await resp.json();
       const content = data.content[0].text;
 
       try {
@@ -4102,26 +4029,15 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
       // Text-based analysis for DXF
       const analysis = await analyzeDXFComplete(filePath);
 
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 8000,
-          temperature: 0,
-          messages: [{
-            role: 'user',
-            content: `${compliancePrompt}\n\n=== נתוני DXF ===\n${analysis.reportText}`
-          }]
-        })
+      const data = await callClaudeAPI({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 8000,
+        temperature: 0,
+        messages: [{
+          role: 'user',
+          content: `${compliancePrompt}\n\n=== נתוני DXF ===\n${analysis.reportText}`
+        }]
       });
-
-      if (!resp.ok) throw new Error(`Claude API error: ${resp.status}`);
-      const data = await resp.json();
       const content = data.content[0].text;
 
       try {
@@ -4136,26 +4052,15 @@ app.post('/api/plans/analyze', upload.single('planFile'), async (req, res) => {
       // DWG/DWF without vision - text-based requirements check only
       console.log('📝 Using text-based compliance check (no image available)');
 
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 8000,
-          temperature: 0,
-          messages: [{
-            role: 'user',
-            content: `${compliancePrompt}\n\nהערה: לא ניתן היה לעבד את התכנית ויזואלית. אנא סמן את כל הדרישות הוויזואליות כ-needs_review והסבר שנדרשת בדיקה ידנית.\n\nשם הקובץ: ${originalName}`
-          }]
-        })
+      const data = await callClaudeAPI({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 8000,
+        temperature: 0,
+        messages: [{
+          role: 'user',
+          content: `${compliancePrompt}\n\nהערה: לא ניתן היה לעבד את התכנית ויזואלית. אנא סמן את כל הדרישות הוויזואליות כ-needs_review והסבר שנדרשת בדיקה ידנית.\n\nשם הקובץ: ${originalName}`
+        }]
       });
-
-      if (!resp.ok) throw new Error(`Claude API error: ${resp.status}`);
-      const data = await resp.json();
       const content = data.content[0].text;
 
       try {

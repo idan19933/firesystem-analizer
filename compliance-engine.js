@@ -177,32 +177,48 @@ class ComplianceEngine {
     };
     if (systemPrompt) body.system = systemPrompt;
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(body)
-    });
+    const RETRYABLE = [429, 500, 502, 503, 529];
+    const maxRetries = 3;
+    const baseDelay = 5000;
 
-    if (!resp.ok) {
-      const err = await resp.text();
-      throw new Error(`Claude API error: ${resp.status} - ${err}`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify(body)
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        const text = data.content[0].text;
+        const stopReason = data.stop_reason;
+
+        if (stopReason === 'max_tokens') {
+          console.warn(`⚠️ Response TRUNCATED (hit ${maxTokens} max_tokens) — JSON may be incomplete`);
+        }
+        console.log(`📊 Response: ${text.length} chars, stop_reason: ${stopReason}`);
+
+        if (returnMeta) return { text, stopReason };
+        return text;
+      }
+
+      const errText = await resp.text();
+      const isRetryable = RETRYABLE.includes(resp.status) ||
+        errText.includes('overloaded') || errText.includes('Overloaded');
+
+      if (isRetryable && attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        console.log(`⚠️ Claude API ${resp.status} — retry ${attempt}/${maxRetries} in ${delay / 1000}s...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+
+      throw new Error(`Claude API error: ${resp.status} - ${errText}`);
     }
-
-    const data = await resp.json();
-    const text = data.content[0].text;
-    const stopReason = data.stop_reason;
-
-    if (stopReason === 'max_tokens') {
-      console.warn(`⚠️ Response TRUNCATED (hit ${maxTokens} max_tokens) — JSON may be incomplete`);
-    }
-    console.log(`📊 Response: ${text.length} chars, stop_reason: ${stopReason}`);
-
-    if (returnMeta) return { text, stopReason };
-    return text;
   }
 
   _parseJSON(text) {
