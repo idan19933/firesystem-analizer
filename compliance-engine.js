@@ -607,6 +607,7 @@ ${allText}`
   }
 
   // ===== PHASE 2: CHECK PLANS (ai_plan_check + measurement items only) =====
+  // Batched: splits requirements into groups of ~15, processes 2 concurrently
 
   async checkPlansAgainstRequirements(projectId, planImageBuffers) {
     const project = this.projects.get(projectId);
@@ -623,27 +624,13 @@ ${allText}`
 
     console.log(`🔍 Checking ${planCheckable.length} requirements against plans...`);
 
-    // Build requirements JSON for prompt
-    const reqsForPrompt = planCheckable.map(r => ({
-      id: r.id,
-      title: r.title_he,
-      description: r.description_he,
-      verification_method: r.verification_method,
-      plan_elements_to_check: r.plan_elements_to_check || [],
-      numeric_threshold: r.numeric_threshold || null
-    }));
-
-    const prompt = PLAN_CHECK_PROMPT.replace('{REQUIREMENTS}', JSON.stringify(reqsForPrompt, null, 2));
-
-    // Build image content for Claude
+    // Prepare image content objects (overview = first, rest = zones)
     const imageContents = [];
     for (const buf of planImageBuffers) {
-      if (!buf || buf.length < 100) continue;
-      const base64 = buf.toString('base64');
-      const mediaType = 'image/png';
+      if (!buf || buf.length < 500) continue;
       imageContents.push({
         type: 'image',
-        source: { type: 'base64', media_type: mediaType, data: base64 }
+        source: { type: 'base64', media_type: 'image/png', data: buf.toString('base64') }
       });
     }
 
@@ -651,17 +638,127 @@ ${allText}`
       throw new Error('No valid plan images provided');
     }
 
-    const responseText = await this._callClaude([{
-      role: 'user',
-      content: [...imageContents, { type: 'text', text: prompt }]
-    }]);
+    // The first image is the overview; the rest are zone detail images
+    const overviewImage = imageContents[0];
+    const zoneImages = imageContents.slice(1);
 
-    const parsed = this._parseJSON(responseText);
-    const results = parsed.results || [];
+    // Split requirements into batches of 15
+    const BATCH_SIZE = 15;
+    const batches = [];
+    for (let i = 0; i < planCheckable.length; i += BATCH_SIZE) {
+      batches.push(planCheckable.slice(i, i + BATCH_SIZE));
+    }
+
+    console.log(`📦 Split into ${batches.length} batches of ~${BATCH_SIZE} requirements`);
+
+    // Process batches — 2 concurrently
+    const CONCURRENT = 2;
+    const allResults = [];
+
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx += CONCURRENT) {
+      const currentBatches = batches.slice(batchIdx, batchIdx + CONCURRENT);
+
+      const batchPromises = currentBatches.map(async (batch, offset) => {
+        const batchNum = batchIdx + offset + 1;
+        console.log(`  📋 Batch ${batchNum}/${batches.length}: ${batch.length} requirements (${batch[0].id} - ${batch[batch.length - 1].id})`);
+
+        // Build image set: overview + up to 2 zone images (rotate through zones)
+        const batchImages = [overviewImage];
+        if (zoneImages.length > 0) {
+          const zoneOffset = (batchNum - 1) % Math.max(zoneImages.length, 1);
+          for (let z = 0; z < Math.min(2, zoneImages.length); z++) {
+            const zi = (zoneOffset + z) % zoneImages.length;
+            batchImages.push(zoneImages[zi]);
+          }
+        }
+
+        // Build compact requirements list for prompt
+        const reqList = batch.map(r => ({
+          id: r.id,
+          title: r.title_he,
+          desc: r.description_he,
+          method: r.verification_method,
+          look_for: r.plan_elements_to_check || [],
+          threshold: r.numeric_threshold || null
+        }));
+
+        const prompt = `You are checking architectural plans for Israeli building permit compliance.
+
+CHECK THESE ${batch.length} REQUIREMENTS against the plan images:
+
+${JSON.stringify(reqList, null, 1)}
+
+For EACH requirement, analyze what you see in the plans and return:
+{
+  "results": [
+    {
+      "requirement_id": "REQ-XXX",
+      "status": "pass" | "fail" | "partial" | "unclear",
+      "confidence": 0.0-1.0,
+      "finding_he": "ממצא בעברית",
+      "evidence": "What you see in the plan",
+      "location_in_plan": "Where in the plan",
+      "measured_value": "If measurement — estimated value",
+      "recommendation_he": "המלצה אם נכשל (עברית)"
+    }
+  ]
+}
+
+RULES:
+- You MUST return a result for ALL ${batch.length} requirements listed above
+- "pass" = clearly met, "fail" = clearly NOT met, "partial" = partially met, "unclear" = cannot determine (confidence < 0.5)
+- For measurements: estimate if possible, note confidence
+- Be specific about WHERE in the plan you see evidence
+- Hebrew terms: חדר מדרגות=stairwell, יציאת חירום=emergency exit, דלת אש=fire door, מתזים=sprinklers, גלאי עשן=smoke detector
+- Return ONLY valid JSON`;
+
+        try {
+          const responseText = await this._callClaude([{
+            role: 'user',
+            content: [...batchImages, { type: 'text', text: prompt }]
+          }], 4096);
+
+          const parsed = this._parseJSON(responseText);
+          const results = parsed?.results || (Array.isArray(parsed) ? parsed : []);
+
+          if (Array.isArray(results) && results.length > 0) {
+            console.log(`  ✅ Batch ${batchNum}: ${results.length} results`);
+            return results;
+          }
+          console.log(`  ⚠️ Batch ${batchNum}: unexpected format, got ${typeof parsed}`);
+          return [];
+        } catch (err) {
+          console.error(`  ❌ Batch ${batchNum} failed: ${err.message}`);
+          // Return "unclear" for all items in this failed batch
+          return batch.map(r => ({
+            requirement_id: r.id,
+            status: 'unclear',
+            confidence: 0,
+            finding_he: 'שגיאה בבדיקת AI',
+            evidence: `API error: ${err.message}`,
+            location_in_plan: '',
+            recommendation_he: ''
+          }));
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      for (const results of batchResults) {
+        allResults.push(...results);
+      }
+
+      // Small delay between concurrent groups to avoid rate limits
+      if (batchIdx + CONCURRENT < batches.length) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+
+    console.log(`📊 Total results: ${allResults.length}/${planCheckable.length}`);
 
     // Apply results to requirements
-    for (const result of results) {
-      const req = project.requirements.find(r => r.id === result.requirement_id);
+    for (const result of allResults) {
+      const reqId = result.requirement_id || result.id;
+      const req = project.requirements.find(r => r.id === reqId);
       if (req) {
         req.ai_result = {
           status: result.status,
@@ -679,12 +776,22 @@ ${allText}`
       }
     }
 
+    // Count statuses
+    const counts = { pass: 0, fail: 0, partial: 0, unclear: 0 };
+    for (const r of allResults) {
+      counts[r.status] = (counts[r.status] || 0) + 1;
+    }
+    console.log(`✅ Plan check complete: ${JSON.stringify(counts)}`);
+    console.log(`   Checked: ${allResults.length}/${planCheckable.length} plan-checkable items`);
+
     this._persist(projectId);
 
     return {
       projectId,
-      checkedCount: results.length,
-      results,
+      checkedCount: allResults.length,
+      totalCheckable: planCheckable.length,
+      counts,
+      results: allResults,
       summary: this.getSummary(projectId)
     };
   }
